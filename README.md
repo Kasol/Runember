@@ -44,9 +44,15 @@ npm run m0                    # 第二步：完整探针（需要认证，约 3-
 
 - [x] M0 探针（本目录）
 - [x] M1 核心循环：monorepo + SQLite 队列 + 调度器 + host-dir 容器执行 + CLI（验收通过）
-- [ ] M2 GUI：看板 / 详情 / SSE 实时日志 / 总结页
-- [ ] M3 钉钉通知 + blocked 反馈续跑闭环
+- [x] M2（缓行）
+- [x] M3 钉钉闭环：webhook 通知 + Stream 反馈（手机 @机器人 resume，端到端验收通过）
 - [ ] M4 cron 计划 + 额度熔断 + 并发放开（CONCURRENCY）
+
+## M3 手机闭环（已验收）
+
+任务阻塞 → 钉钉群推送问题原文 → 手机上 `@机器人 resume <id> 你的决定` → daemon（出站 WSS，零公网暴露）收到指令 → 同一会话上下文续跑 → 完成回群汇报。指令语法：`resume/继续 <id> <决定>`、`retry/重试 <id>`、`cancel/取消 <id>`、`status/状态`。
+
+预览图：`docs/preview-dingtalk.png`
 
 ## M1 用法
 
