@@ -193,3 +193,23 @@ export interface Notifier {
 export interface ExecutionBackend {
   readonly name: string;
 }
+
+// ─────────────────────────── 反馈通道（M3+） ───────────────────────────
+
+/** 人从远端（IM/网页/…）发回的指令 */
+export interface FeedbackAction {
+  type: 'resume' | 'retry' | 'cancel' | 'status' | 'help';
+  taskId?: number;
+  feedback?: string;
+}
+
+/**
+ * 反馈通道：把"人的决定"从外部世界送回 daemon。
+ * 与 Notifier 对称（一个出站一个入站）；实现：钉钉 Stream / 未来 GUI/企微…
+ * 通道自带回复能力（reply），dispatch 结果通过它回给人。
+ */
+export interface FeedbackChannel {
+  readonly name: string;
+  start(dispatch: (action: FeedbackAction) => Promise<{ ok: boolean; message: string }>): Promise<void>;
+  stop?(): void | Promise<void>;
+}

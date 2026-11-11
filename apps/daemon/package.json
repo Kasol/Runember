@@ -6,6 +6,7 @@
   "dependencies": {
     "@agentdesk/adapters": "*",
     "@agentdesk/core": "*",
+    "dingtalk-stream-sdk-nodejs": "^2.0.4",
     "dockerode": "^4.0.0",
     "fastify": "^5.0.0"
   }

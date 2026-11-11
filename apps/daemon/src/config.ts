@@ -13,6 +13,8 @@ export interface AppConfig {
   agents: Record<string, { image: string; codexHomeVolume: string }>;
   /** 通知渠道列表（M3 起各渠道实现读这里；M1 只有 console） */
   notify: { channels: Array<Record<string, unknown>> };
+  /** 反馈通道：把人的决定送回 daemon（钉钉 Stream = 手机闭环） */
+  feedback: { dingtalkStream?: { clientId: string; clientSecret: string } };
   dataDir: string;
   proxy: { httpsProxy: string; httpProxy: string };
 }
@@ -24,6 +26,7 @@ const DEFAULTS: AppConfig = {
     codex: { image: 'agentdesk/runner-codex:m0', codexHomeVolume: 'agentdesk-codex-home' },
   },
   notify: { channels: [] },
+  feedback: {},
   dataDir: join(homedir(), '.agentdesk'),
   proxy: { httpsProxy: '', httpProxy: '' },
 };

@@ -49,9 +49,21 @@ async function main(): Promise<void> {
   console.log(`✅ API 就绪 http://${cfg.server.host}:${cfg.server.port}（token 鉴权${cfg.server.token ? '开' : '关'}）`);
   scheduler.start();
 
+  // 反馈通道（配置了才启动）：@机器人 指令 → 统一动作入口 → 回复进群
+  let feedbackChannel: import('@agentdesk/core').FeedbackChannel | undefined;
+  if (cfg.feedback.dingtalkStream?.clientId) {
+    const { DingTalkStreamChannel } = await import('./dingtalk-stream.js');
+    feedbackChannel = new DingTalkStreamChannel(cfg.feedback.dingtalkStream);
+    const { applyTaskAction } = await import('./actions.js');
+    await feedbackChannel.start(action => applyTaskAction(store, scheduler, action));
+  } else {
+    console.log('ℹ️ 未配置反馈通道（feedback.dingtalkStream）—— 阻塞反馈需走 CLI');
+  }
+
   const shutdown = async () => {
     console.log('\n👋 优雅停机…');
     scheduler.stop();
+    feedbackChannel?.stop?.();
     await app.close();
     process.exit(0);
   };

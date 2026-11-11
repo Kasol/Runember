@@ -81,32 +81,15 @@ export function buildServer(deps: {
     return { task: t, runs: store.runsOfTask(t.id) };
   });
 
-  /** 反馈闭环入口：resume（带反馈续跑）/ cancel */
+  /** 反馈闭环入口：与钉钉 Stream 通道共用 applyTaskAction，语义完全一致 */
   app.post<{ Params: { id: string }; Body: { type: string; feedback?: string } }>(
     '/api/tasks/:id/actions', async (req, reply) => {
-      const t = store.getTask(Number(req.params.id));
-      if (!t) return reply.code(404).send({ error: 'not found' });
       const { type, feedback } = req.body ?? ({} as any);
-      if (type === 'resume') {
-        if (t.status !== 'blocked') return reply.code(409).send({ error: `仅 blocked 任务可 resume（当前 ${t.status}）` });
-        store.setPendingFeedback(t.id, feedback ?? '请继续');
-        store.setTaskStatus(t.id, 'queued');
-        scheduler.tickNow();
-        return { ok: true, queued: 'resume', task: store.getTask(t.id) };
-      }
-      if (type === 'retry') {
-        if (!['failed', 'blocked', 'done'].includes(t.status)) return reply.code(409).send({ error: '当前状态不可重试' });
-        store.setPendingFeedback(t.id, null);
-        store.setTaskStatus(t.id, 'queued');
-        scheduler.tickNow();
-        return { ok: true, queued: 'retry', task: store.getTask(t.id) };
-      }
-      if (type === 'cancel') {
-        if (t.status === 'running') return reply.code(409).send({ error: 'running 任务暂不支持在线取消（M2: 杀容器）' });
-        store.setTaskStatus(t.id, 'cancelled');
-        return { ok: true, task: store.getTask(t.id) };
-      }
-      return reply.code(400).send({ error: 'type 必须是 resume|retry|cancel' });
+      const { applyTaskAction } = await import('./actions.js');
+      const r = await applyTaskAction(store, scheduler,
+        { type: type as any, taskId: Number(req.params.id), feedback });
+      if (!r.ok) return reply.code(409).send({ error: r.message });
+      return { ok: true, message: r.message, task: store.getTask(Number(req.params.id)) };
     },
   );
 
