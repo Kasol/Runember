@@ -43,16 +43,32 @@ npm run m0                    # 第二步：完整探针（需要认证，约 3-
 ## 里程碑
 
 - [x] M0 探针（本目录）
-- [ ] M1 核心循环：SQLite 队列 + 调度器 + 容器执行 + 日志落盘 + CLI
+- [x] M1 核心循环：monorepo + SQLite 队列 + 调度器 + host-dir 容器执行 + CLI（验收通过）
 - [ ] M2 GUI：看板 / 详情 / SSE 实时日志 / 总结页
 - [ ] M3 钉钉通知 + blocked 反馈续跑闭环
 - [ ] M4 cron 计划 + 额度熔断 + 并发放开（CONCURRENCY）
 
+## M1 用法（Windows 推荐 .cmd 启动器，自动切 UTF-8 防中文乱码）
+
+```bash
+deskd.cmd --data-dir ./data/agentdesk     # 1. 起 daemon（保持运行）
+desk.cmd project add demo D:/work/demo    # 2. 注册项目（任意 git 仓库的本地路径）
+desk.cmd auth codex                       # 3. 首次：设备码登录（浏览器授权，凭证落卷）
+desk.cmd run demo "给 README 补一节 FAQ"  # 4. 挂任务（离线时按队列自动推进）
+desk.cmd status                           # 5. 看队列；desk.cmd status <id> 看总结
+desk.cmd resume <id> "按方案B继续"        # 阻塞后带反馈续跑（同一会话上下文）
+```
+
+Linux/macOS/Git Bash 等价命令：`npm run daemon` / `npm run desk -- <命令>`。
+裸终端中文乱码时：`chcp 65001`，或直接用 .cmd 启动器。
+
 ## 目录
 
 ```
-scripts/m0-probe.ts     # M0 探针（dockerode 驱动四项验证）
-scripts/m0.sh           # 编排：构建镜像 → 容器内跑探针
-images/runner-codex/    # 任务执行容器镜像（git + 钉版本 codex）
-images/m0-probe/        # 探针镜像（node + dockerode）
+packages/core            # 纯领域层：状态机 / blocked 分类 / 调度闸门 / 三大接口（零 IO）
+packages/adapters        # Agent 注册表 + CodexAdapter（新增 agent = 加一个文件）
+apps/daemon              # 配置/存储/调度/Runner/API/通知 —— 常驻核心
+apps/cli                 # desk 命令行
+scripts/m0-probe.ts      # M0 探针（保留为验证工具）
+images/runner-codex/     # 任务执行容器镜像（git + 钉版本 codex）
 ```
