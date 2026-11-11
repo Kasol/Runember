@@ -8,7 +8,7 @@
  */
 import Docker from 'dockerode';
 import { Writable } from 'node:stream';
-import { appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
@@ -106,6 +106,31 @@ export class Runner {
     catch { await docker.createVolume({ Name: name }); }
   }
 
+  /**
+   * 播种宿主 skills → codex-home 卷（单向覆盖，宿主是 source of truth）。
+   * 让容器内 codex 继承宿主 GUI/CLI 的全局 skills（如 git-dev-flow 等）。
+   * 宿主 skills 目录位置可配置（agents.<id>.hostSkillsDir），默认 ~/.codex/skills。
+   */
+  private async seedSkills(volumeName: string): Promise<void> {
+    const { cfg, docker } = this.deps;
+    const hostSkills = cfg.agents['codex']?.hostSkillsDir;
+    if (!hostSkills || !existsSync(hostSkills)) return;
+
+    await this.ensureVolume(volumeName);
+    const sower = await docker.createContainer({
+      Image: 'alpine:latest',
+      Cmd: ['sh', '-c', 'mkdir -p /codex-home/skills && cp -r /host-skills/. /codex-home/skills/'],
+      HostConfig: {
+        Binds: [`${toBind(hostSkills)}:/host-skills:ro`, `${volumeName}:/codex-home`],
+        AutoRemove: true,
+      },
+      Labels: { 'agentdesk.seed': 'skills' },
+    });
+    await sower.start();
+    await sower.wait();
+    console.log(`🌱 已播种宿主 skills → ${volumeName}`);
+  }
+
   /** 任务入口：task 必须处于 queued，终态落库 + 发通知 */
   async execute(taskId: number): Promise<void> {
     const { cfg, store, events } = this.deps;
@@ -130,7 +155,8 @@ export class Runner {
     const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
 
     try {
-      // ① 凭证自检：auth.json 不在就别浪费一次 codex 启动
+      // ① 播种宿主 skills（若有）→ 凭证自检
+      await this.seedSkills(adapter.homeVolume);
       await this.ensureVolume(adapter.homeVolume);
       const auth = await this.spawn({
         image: adapter.image, cmd: adapter.authCheckArgs(), binds,

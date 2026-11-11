@@ -10,7 +10,7 @@ export interface AppConfig {
   server: { host: string; port: number; token: string; publicUrl: string };
   scheduler: { concurrency: number; tickMs: number; taskTimeoutMin: number };
   /** agent 配置是开放字典：注册表里有什么 id，这里就能配什么 */
-  agents: Record<string, { image: string; codexHomeVolume: string }>;
+  agents: Record<string, { image: string; codexHomeVolume: string; hostSkillsDir?: string }>;
   /** 通知渠道列表（M3 起各渠道实现读这里；M1 只有 console） */
   notify: { channels: Array<Record<string, unknown>> };
   /** 反馈通道：把人的决定送回 daemon（钉钉 Stream = 手机闭环） */
@@ -23,7 +23,12 @@ const DEFAULTS: AppConfig = {
   server: { host: '127.0.0.1', port: 8787, token: '', publicUrl: '' },
   scheduler: { concurrency: 1, tickMs: 5000, taskTimeoutMin: 30 },
   agents: {
-    codex: { image: 'agentdesk/runner-codex:m0', codexHomeVolume: 'agentdesk-codex-home' },
+    codex: {
+      image: 'agentdesk/runner-codex:m0',
+      codexHomeVolume: 'agentdesk-codex-home',
+      // 宿主 GUI/CLI 的全局 skills 目录：存在则每次任务前单向播种进 codex-home 卷
+      hostSkillsDir: join(homedir(), '.codex', 'skills'),
+    },
   },
   notify: { channels: [] },
   feedback: {},
