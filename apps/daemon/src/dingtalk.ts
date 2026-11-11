@@ -1,19 +1,13 @@
 /**
- * 钉钉自定义机器人 Notifier（M3）。
- * 接入方式：群 → 设置 → 机器人 → 添加"自定义"机器人 → 安全设置选"加签"。
- * 纯出站 HTTPS（国内直连，无需代理），符合"零入站"的部署哲学。
- *
- * 配置示例（~/.agentdesk/config.json）：
- *   "notify": { "channels": [{
- *     "type": "dingtalk-webhook",
- *     "access_token": "xxx",
- *     "secret": "SECxxx",
- *     "events": ["blocked", "failed"]        // 可加 "succeeded"
- *   }]}
+ * 钉钉自定义机器人（webhook+加签）Notifier —— 通知腿的独立实现。
+ * M3.5 起推荐改用应用机器人（dingtalk-app.ts）单机器人双职责；
+ * 本实现保留为可选渠道（不想建企业内部应用、只需出站通知的极简场景）。
+ * 消息模板与所有钉钉渠道共享：dingtalk-markdown.ts。
  */
 import { createHmac } from 'node:crypto';
 import type { NotifyEvent } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
+import { buildEventMarkdown } from './dingtalk-markdown.js';
 
 export class DingTalkNotifier extends DedupedNotifier {
   readonly name = 'dingtalk';
@@ -22,7 +16,7 @@ export class DingTalkNotifier extends DedupedNotifier {
     private ch: { access_token: string; secret?: string; events?: string[]; atAll?: boolean },
     private publicUrl: string,
   ) {
-    super(30 * 60 * 1000); // 同任务同类事件 30 分钟去重（防骚扰基类）
+    super(30 * 60 * 1000);
   }
 
   /** 直接发原始 markdown（notify-test 用，绕过去重与事件过滤） */
@@ -55,60 +49,7 @@ export class DingTalkNotifier extends DedupedNotifier {
   protected async send(e: NotifyEvent): Promise<void> {
     const want = this.ch.events ?? ['blocked', 'failed'];
     if (!want.includes(e.kind.replace('run.', ''))) return;
-    const t = `**任务#${e.task.id}** · 项目 \`${e.project.name}\``;
-
-    if (e.kind === 'run.blocked') {
-      const md = [
-        '### ⚠️ agentdesk 任务阻塞',
-        '',
-        `${t} · \`${e.blockedKind}\``,
-        '',
-        e.question ? `> ${e.question}` : '> （详见任务日志）',
-        '',
-        '**反馈继续：**',
-        '',
-        '```bash',
-        `npm run desk -- resume ${e.task.id} "你的决定"`,
-        '```',
-        this.publicUrl ? `\n[打开任务详情](${this.publicUrl}/tasks/${e.task.id})` : '',
-      ].join('\n');
-      await this.post('⚠️ agentdesk 任务阻塞', md);
-      return;
-    }
-
-    if (e.kind === 'run.failed') {
-      const md = [
-        '### ❌ agentdesk 任务失败',
-        '',
-        `${t}`,
-        '',
-        `> ${e.reason.slice(0, 200)}`,
-        '',
-        '```bash',
-        `npm run desk -- retry ${e.task.id}`,
-        '```',
-      ].join('\n');
-      await this.post('❌ agentdesk 任务失败', md);
-      return;
-    }
-
-    if (e.kind === 'run.succeeded') {
-      const md = [
-        '### ✅ agentdesk 任务完成',
-        '',
-        `${t}`,
-        '',
-        e.summary.agentMessage ? `> ${e.summary.agentMessage.replace(/\n/g, ' ').slice(0, 200)}` : '',
-        '',
-        e.summary.filesChanged.length
-          ? `📝 改动 ${e.summary.filesChanged.length} 个文件`
-          : '📝 无文件改动',
-      ].join('\n');
-      await this.post('✅ agentdesk 任务完成', md);
-      return;
-    }
-
-    // run.started（默认不订阅，配置了才到这）
-    await this.post('▶️ agentdesk 任务开始', `### ▶️ 任务开始\n\n${t}`);
+    const md = buildEventMarkdown(e, this.publicUrl);
+    if (md) await this.post(md.title, md.text);
   }
 }

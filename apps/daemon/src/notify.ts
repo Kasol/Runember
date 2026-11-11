@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import type { Notifier, NotifyEvent } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
 import { DingTalkNotifier } from './dingtalk.js';
+import { DingTalkAppNotifier } from './dingtalk-app.js';
 
 export { DedupedNotifier };
 
@@ -52,6 +53,7 @@ export class ConsoleNotifier extends DedupedNotifier {
 export function buildNotifiers(
   channels: Array<Record<string, unknown>>,
   publicUrl: string,
+  appCreds?: { clientId: string; clientSecret: string },
 ): Notifier[] {
   const list: Notifier[] = [new ConsoleNotifier()];
   for (const ch of channels) {
@@ -62,6 +64,13 @@ export function buildNotifiers(
         { access_token: token, secret: ch.secret ? String(ch.secret) : undefined,
           events: ch.events as string[] | undefined, atAll: !!ch.atAll },
         publicUrl,
+      ));
+    } else if (ch.type === 'dingtalk-app') {
+      // 单机器人双职责渠道：复用 feedback.dingtalkStream 的应用凭证主动推群
+      if (!appCreds) { console.warn('[notify] dingtalk-app 渠道需要 feedback.dingtalkStream 凭证，已跳过'); continue; }
+      list.push(new DingTalkAppNotifier(
+        appCreds.clientId, appCreds.clientSecret, publicUrl,
+        (ch.events as string[] | undefined) ?? ['blocked', 'failed'],
       ));
     } else {
       console.warn(`[notify] 未知渠道类型: ${String(ch.type)}，已跳过`);

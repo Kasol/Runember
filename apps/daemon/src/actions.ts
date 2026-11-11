@@ -35,18 +35,37 @@ export async function applyTaskAction(
   }
 
   const id = action.taskId ?? -1;
-  const task = store.getTask(id);
-  if (!task) return { ok: false, message: `任务 #${id ?? '?'} 不存在` };
+  let task = store.getTask(id);
+  if (!task && action.type !== 'resume') return { ok: false, message: `任务 #${id ?? '?'} 不存在` };
 
   switch (action.type) {
     case 'resume': {
-      if (task.status !== 'blocked') return { ok: false, message: `#${id} 当前 ${task.status}，仅 blocked 可 resume` };
-      store.setPendingFeedback(id, action.feedback ?? '请继续');
-      store.setTaskStatus(id, 'queued');
+      // 免编号：未指定 id 时指向唯一阻塞任务（v1 串行模式下常态）
+      let rid = action.taskId;
+      if (!rid) {
+        const blocked = store.listTasks('blocked');
+        if (blocked.length === 0) return { ok: false, message: '当前没有阻塞任务（发 status 查看队列）' };
+        if (blocked.length > 1) {
+          return {
+            ok: false,
+            message: '当前有多个阻塞任务，请带编号：\n' +
+              blocked.map(t => `  resume ${t.id} <决定> —— ${t.prompt.slice(0, 30)}…`).join('\n'),
+          };
+        }
+        rid = blocked[0]!.id;
+        task = blocked[0]!;
+      }
+      if (!task) return { ok: false, message: `任务 #${rid} 不存在` };
+      if (task.status !== 'blocked') {
+        return { ok: false, message: `#${rid} 当前 ${task.status}，仅 blocked 可 resume（已完成可用 retry ${rid} 重跑）` };
+      }
+      store.setPendingFeedback(rid, action.feedback ?? '请继续');
+      store.setTaskStatus(rid, 'queued');
       scheduler.tickNow();
-      return { ok: true, message: `✅ #${id} 已带反馈入队续跑` };
+      return { ok: true, message: `✅ #${rid} 已带反馈入队续跑` };
     }
     case 'retry': {
+      if (!task) return { ok: false, message: `任务 #${id} 不存在` };
       if (!['failed', 'blocked', 'done'].includes(task.status)) return { ok: false, message: `#${id} 当前 ${task.status}，不可重试` };
       store.setPendingFeedback(id, null);
       store.setTaskStatus(id, 'queued');
@@ -54,6 +73,7 @@ export async function applyTaskAction(
       return { ok: true, message: `✅ #${id} 已重新入队` };
     }
     case 'cancel': {
+      if (!task) return { ok: false, message: `任务 #${id} 不存在` };
       if (task.status === 'running') return { ok: false, message: `#${id} 正在运行，暂不支持在线取消（M2）` };
       store.setTaskStatus(id, 'cancelled');
       return { ok: true, message: `🚫 #${id} 已取消` };

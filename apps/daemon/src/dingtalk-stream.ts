@@ -17,12 +17,14 @@
  */
 import { DWClient, EventAck, TOPIC_ROBOT } from 'dingtalk-stream-sdk-nodejs';
 import type { FeedbackAction, FeedbackChannel } from '@agentdesk/core';
+import { learn } from './dingtalk-state.js';
 
 interface IncomingMessage {
   text?: { content?: string };
   senderNick?: string;
   sessionWebhook?: string;
   conversationId?: string;
+  robotCode?: string;
 }
 
 function parseCommand(raw: string): FeedbackAction {
@@ -30,8 +32,9 @@ function parseCommand(raw: string): FeedbackAction {
   if (/^(status|状态|队列)$/i.test(s)) return { type: 'status' };
   if (/^(help|帮助|\?|？)$/i.test(s)) return { type: 'help' };
 
-  let m = s.match(/^(?:resume|继续|恢复)\s*#?(\d+)\s*[:：,，]?\s*([\s\S]*)$/i);
-  if (m) return { type: 'resume', taskId: Number(m[1]), feedback: m[2]!.trim() || '请继续' };
+  // resume 可省编号：单阻塞任务时自动指向它（applyTaskAction 内解析歧义）
+  let m = s.match(/^(?:resume|继续|恢复)\s*(?:#?(\d+))?\s*[:：,，]?\s*([\s\S]*)$/i);
+  if (m) return { type: 'resume', taskId: m[1] ? Number(m[1]) : undefined, feedback: m[2]!.trim() || '请继续' };
   m = s.match(/^(?:retry|重试)\s*#?(\d+)\s*$/i);
   if (m) return { type: 'retry', taskId: Number(m[1]) };
   m = s.match(/^(?:cancel|取消|终止)\s*#?(\d+)\s*$/i);
@@ -57,6 +60,8 @@ export class DingTalkStreamChannel implements FeedbackChannel {
       try {
         const msg: IncomingMessage = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
         const content = msg.text?.content ?? '';
+        // 学习群标识（应用机器人主动推送 groupMessages/send 需要它）
+        if (msg.conversationId) learn({ conversationId: msg.conversationId, robotCode: msg.robotCode });
         if (!content.trim()) return { status: EventAck.SUCCESS };
         console.log(`📥 [dingtalk-stream] ${msg.senderNick ?? '?'}: ${content.slice(0, 60)}`);
 

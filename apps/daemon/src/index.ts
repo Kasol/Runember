@@ -38,7 +38,13 @@ async function main(): Promise<void> {
   if (cfg.proxy.httpsProxy) console.log(`  容器代理=${cfg.proxy.httpsProxy}`);
 
   const store = new Store(cfg.dataDir);
-  const notifiers = buildNotifiers(cfg.notify.channels, cfg.server.publicUrl);
+  const notifiers = buildNotifiers(
+    cfg.notify.channels,
+    cfg.server.publicUrl,
+    cfg.feedback.dingtalkStream?.clientId
+      ? { clientId: cfg.feedback.dingtalkStream.clientId, clientSecret: cfg.feedback.dingtalkStream.clientSecret }
+      : undefined,
+  );
   const events = new EventBus(notifiers);
   const docker = new Docker();
   const runner = new Runner({ docker, cfg, store, events });
@@ -53,6 +59,8 @@ async function main(): Promise<void> {
   let feedbackChannel: import('@agentdesk/core').FeedbackChannel | undefined;
   if (cfg.feedback.dingtalkStream?.clientId) {
     const { DingTalkStreamChannel } = await import('./dingtalk-stream.js');
+    const { initState } = await import('./dingtalk-state.js');
+    initState(cfg.dataDir); // 群标识持久化文件（应用机器人主动推送需要）
     feedbackChannel = new DingTalkStreamChannel(cfg.feedback.dingtalkStream);
     const { applyTaskAction } = await import('./actions.js');
     await feedbackChannel.start(action => applyTaskAction(store, scheduler, action));

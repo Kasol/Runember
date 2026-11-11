@@ -11,6 +11,7 @@ import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
 import { DingTalkNotifier } from './dingtalk.js';
+import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
 
 export function buildServer(deps: {
@@ -30,10 +31,11 @@ export function buildServer(deps: {
 
   /** 通知通路测试：向所有已配置的外部渠道直接发一条测试消息 */
   app.post('/api/notify/test', async (_req, reply) => {
-    const dings = deps.notifiers.filter((n): n is DingTalkNotifier => n instanceof DingTalkNotifier);
-    if (!dings.length) return reply.code(400).send({ error: '未配置任何外部通知渠道（notify.channels）' });
+    const senders = deps.notifiers.filter((n): n is DingTalkNotifier | DingTalkAppNotifier =>
+      n instanceof DingTalkNotifier || n instanceof DingTalkAppNotifier);
+    if (!senders.length) return reply.code(400).send({ error: '未配置任何外部通知渠道（notify.channels）' });
     const results: Array<{ channel: string; ok: boolean; error?: string }> = [];
-    for (const d of dings) {
+    for (const d of senders) {
       try {
         await d.sendRaw('🧪 agentdesk 通路测试',
           '### 🧪 agentdesk 通路测试\n\n收到这条消息 = 钉钉通知链路已打通 ✅');
