@@ -71,6 +71,11 @@ export class Runner {
       Labels: { 'agentdesk.run': opts.tag },
       AttachStdout: true,
       AttachStderr: true,
+      // codex 会在 stdin 打开时等待输入（"Reading additional input from stdin"），
+      // 任务完成后不退出 → 状态滞后。显式关闭 stdin 让其立即结束。
+      OpenStdin: false,
+      StdinOnce: false,
+      AttachStdin: false,
       HostConfig: {
         Binds: opts.binds,
         SecurityOpt: ['seccomp=unconfined'], // bwrap 需要 userns（M0 实测）
