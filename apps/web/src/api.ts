@@ -35,6 +35,8 @@ export const client = {
   run: (id: number) => api<{ run: Run; logTail: string[] }>('GET', `/api/runs/${id}`),
   createTask: (project: string | number, prompt: string) =>
     api<{ task: Task }>('POST', '/api/tasks', { project, prompt }),
+  createProject: (name: string, workspace_path: string, agent_id = 'codex') =>
+    api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id }),
   action: (id: number, type: string, feedback?: string) =>
     api<{ ok: boolean; message?: string }>('POST', `/api/tasks/${id}/actions`, { type, feedback }),
 };

@@ -46,7 +46,10 @@ export default function App() {
         <span className={error ? 'conn err' : 'conn'}>{error ? 'daemon 离线' : 'daemon 已连接'}</span>
       </header>
 
-      <NewTask projects={projects} onCreated={() => void refresh()} />
+      <div className="toolbar">
+        <NewTask projects={projects} onCreated={() => void refresh()} />
+        <AddProject onCreated={() => void refresh()} hasAny={projects.length > 0} />
+      </div>
 
       {error && <div className="banner">{error}</div>}
 
@@ -178,6 +181,54 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
         {log.length > 0 && (
           <pre className="log">{log.slice(-40).join('\n')}</pre>
         )}
+      </div>
+    </div>
+  );
+}
+
+function AddProject(props: { onCreated: () => void; hasAny: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const submit = async () => {
+    if (!name.trim() || !path.trim() || busy) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      await client.createProject(name.trim(), path.trim());
+      setName('');
+      setPath('');
+      setOpen(false);
+      props.onCreated();
+    } catch (e: any) { setMsg(e?.message ?? '注册失败'); }
+    setBusy(false);
+  };
+
+  if (!open) {
+    return <button className="new-task" onClick={() => setOpen(true)}>＋ 添加项目</button>;
+  }
+  return (
+    <div className="new-task-box">
+      <div className="field-row">
+        <input
+          placeholder="项目名（如 myapp）"
+          value={name} onChange={e => setName(e.target.value)}
+        />
+        <input
+          placeholder="本地 git 仓库的绝对路径（如 D:/work/myapp）"
+          value={path} onChange={e => setPath(e.target.value)}
+          style={{ flex: 2 }}
+        />
+      </div>
+      {msg && <div className="form-err">{msg}</div>}
+      <div className="row">
+        <button className="primary" disabled={busy || !name.trim() || !path.trim()} onClick={() => void submit()}>
+          {busy ? '注册中…' : '注册'}
+        </button>
+        <button onClick={() => setOpen(false)}>收起</button>
       </div>
     </div>
   );
