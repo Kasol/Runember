@@ -28,6 +28,8 @@ npm run m0                  # 3. 完整探针：验证执行/事件流/会话持
 npm run daemon -- --data-dir ./data/agentdesk    # 保持运行（另开终端执行后续命令）
 ```
 
+接下来可使用下方 CLI，或按 [Web 看板使用手册](#web-看板使用手册) 启动浏览器工作台。
+
 ## CLI 使用手册（`npm run desk -- <命令>`）
 
 ### 日常主循环
@@ -122,13 +124,43 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 - [x] M2 Web 看板：三栏看板 / 任务详情（总结+日志）/ 页面派发与反馈
 - [ ] M4 cron 计划 + 额度熔断 + 运行中任务插话/取消 + 并发放开
 
-## Web 看板
+## Web 看板使用手册
+
+### 启动与访问
+
+先完成「快速开始」中的依赖安装、runner 镜像构建与 Codex 认证。在项目根目录打开两个终端：
 
 ```bash
-npm run web        # 启动后浏览器打开 http://localhost:5173（daemon 需在运行）
+# 终端 1：启动后端，保持运行；已启动则无需重复执行
+npm run daemon -- --data-dir ./data/agentdesk
+
+# 终端 2：首次使用先注册要操作的项目（替换为实际的 git 仓库绝对路径）
+npm run desk -- project add myapp /absolute/path/to/myapp
+
+# 启动 Web 开发服务器，保持运行
+npm run web
 ```
 
-三栏看板（阻塞 / 进行中 / 最近）+ 任务详情（agent 总结、run 历史、日志尾随）+ 页面派发任务与阻塞反馈。开发模式由 Vite 代理 `/api` 到 8787，无需额外配置。
+浏览器打开 http://localhost:5173，顶部显示「daemon 已连接」即可使用。若 5173 已被占用，以 Vite 终端输出的实际地址为准。Windows 项目路径可写为 `D:/work/myapp`；已注册的项目无需重复添加，当前页面不提供项目注册入口。
+
+### 页面操作
+
+1. **派发任务**：点击「＋ 派发任务」，选择项目、填写任务描述，再点击「入队」。任务由 daemon 自动调度，在所选项目的真实目录中执行。
+2. **查看进度**：看板每 3 秒刷新一次。「阻塞」列展示等待处理的任务，「进行中」列包含排队和运行中的任务，「最近」列展示最近 12 条已完成、失败或取消的任务。
+3. **查看详情**：点击任务卡片，查看任务描述、最新 run 的 agent 总结与改动文件概览、Run 历史及最新 run 的日志末尾（最多显示 40 行，每 3 秒刷新）。点击右上角「✕」或弹层外部关闭详情。
+4. **处理阻塞**：在详情中填写决定，点击「带决定续跑」，即可在同一会话上下文中继续。留空或点击阻塞卡片上的「继续」会发送「请继续」；需要明确批复时请填写决定。阻塞任务也可在详情中点击「取消任务」。
+5. **失败重试**：点击失败任务卡片上的「重试」，发起一次全新执行。运行中的任务暂不支持页面取消。
+
+关闭浏览器或 Web 开发服务器后，daemon 仍可继续执行队列；执行期间需保持 daemon 和 Docker 运行，且宿主机不休眠。
+
+### 连接配置与排查
+
+- 默认由 Vite 将 `/api` 请求代理到 `http://127.0.0.1:8787`，本机默认配置无需额外设置。若修改 daemon 的监听端口，需同步调整 `apps/web/vite.config.ts` 中的代理目标，并重启 Web 开发服务器。
+- 页面显示「daemon 离线」时，检查错误横幅、daemon 是否运行，以及代理目标是否与 daemon 地址一致；该提示也可能由 API 请求失败引起。
+- 项目下拉框为空时，先通过上面的 `project add` 命令注册项目，等待页面下次刷新后再派单。
+- 当前 Web 客户端未提供 token 输入，也不会发送 `x-agentdesk-token` 请求头；启用 `server.token` 后，默认 Web 请求会返回 401。此时可通过 `AGENTDESK_TOKEN` 环境变量为 CLI 提供对应 token，或自行接入能为 API 请求附加该请求头的代理。
+
+当前 `npm run web` 启动的是 Vite 开发服务器。可运行 `npm run build -w apps/web` 构建静态资源（输出到 `apps/web/dist`）；daemon 不负责托管这些文件，部署时需另行配置静态文件服务及 `/api` 反向代理。
 
 ## 手机派单（钉钉群）
 
@@ -144,6 +176,7 @@ packages/core            # 纯领域层：状态机 / blocked 分类 / 调度闸
 packages/adapters        # Agent 注册表 + CodexAdapter（新增 agent = 加一个文件）
 apps/daemon              # 配置 / 存储 / 调度 / Runner / API / 通知 —— 常驻核心
 apps/cli                 # desk 命令行
+apps/web                 # React + Vite Web 看板：派单 / 任务详情 / 阻塞反馈
 scripts/                 # M0 探针（保留为验证工具）
 images/runner-codex/     # 任务执行容器镜像（git + 钉版本 codex）
 docs/                    # 钉钉消息预览图等
