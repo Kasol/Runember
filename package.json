@@ -7,10 +7,16 @@
   "engines": {
     "node": ">=22"
   },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "m0": "bash scripts/m0.sh",
     "m0:offline": "bash scripts/m0.sh --offline",
     "m0:login": "bash scripts/m0.sh login",
+    "daemon": "tsx apps/daemon/src/index.ts",
+    "desk": "tsx apps/cli/src/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

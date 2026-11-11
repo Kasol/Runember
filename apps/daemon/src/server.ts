@@ -1,0 +1,138 @@
+/**
+ * HTTP API（Fastify）—— CLI 与未来 Web GUI 的统一入口。
+ * 鉴权：cfg.server.token 非空时要求 x-agentdesk-token 头（自托管默认关闭）。
+ */
+import Fastify, { FastifyInstance } from 'fastify';
+import { availableAgents } from '@agentdesk/adapters';
+import { readFileSync } from 'node:fs';
+import type { TaskStatus } from '@agentdesk/core';
+import type { AppConfig } from './config.js';
+import type { Store } from './store.js';
+import type { Scheduler } from './scheduler.js';
+import { getAdapterId } from './util.js';
+import Docker from 'dockerode';
+
+export function buildServer(deps: {
+  cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker;
+}): FastifyInstance {
+  const { cfg, store, scheduler } = deps;
+  const app = Fastify({ logger: false });
+
+  app.addHook('onRequest', async (req, reply) => {
+    if (!cfg.server.token || req.url === '/healthz') return;
+    if (req.headers['x-agentdesk-token'] !== cfg.server.token) {
+      await reply.code(401).send({ error: 'unauthorized' });
+    }
+  });
+
+  app.get('/healthz', async () => ({ ok: true, ts: Date.now() }));
+
+  app.get('/api/agents', async () => ({ agents: availableAgents() }));
+
+  // ── projects ──
+  app.get('/api/projects', async () => ({ projects: store.listProjects() }));
+  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string } }>(
+    '/api/projects', async (req, reply) => {
+      const { name, workspace_path, agent_id = 'codex' } = req.body ?? ({} as any);
+      if (!name || !workspace_path) return reply.code(400).send({ error: 'name 与 workspace_path 必填' });
+      if (!availableAgents().includes(agent_id)) return reply.code(400).send({ error: `未知 agent: ${agent_id}` });
+      if (store.findProject(name)) return reply.code(409).send({ error: `项目名已存在: ${name}` });
+      return reply.code(201).send({ project: store.addProject(name, workspace_path, agent_id) });
+    },
+  );
+
+  // ── tasks ──
+  app.get<{ Querystring: { status?: TaskStatus } }>('/api/tasks', async (req) =>
+    ({ tasks: store.listTasks(req.query?.status) }));
+
+  app.post<{ Body: { project: string | number; prompt: string } }>(
+    '/api/tasks', async (req, reply) => {
+      const { project, prompt } = req.body ?? ({} as any);
+      if (!project || !prompt) return reply.code(400).send({ error: 'project 与 prompt 必填' });
+      const p = typeof project === 'number'
+        ? store.getProject(project)
+        : store.findProject(project);
+      if (!p) return reply.code(404).send({ error: `项目不存在: ${project}` });
+      return reply.code(201).send({ task: store.addTask(p.id, prompt) });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>('/api/tasks/:id', async (req, reply) => {
+    const t = store.getTask(Number(req.params.id));
+    if (!t) return reply.code(404).send({ error: 'not found' });
+    return { task: t, runs: store.runsOfTask(t.id) };
+  });
+
+  /** 反馈闭环入口：resume（带反馈续跑）/ cancel */
+  app.post<{ Params: { id: string }; Body: { type: string; feedback?: string } }>(
+    '/api/tasks/:id/actions', async (req, reply) => {
+      const t = store.getTask(Number(req.params.id));
+      if (!t) return reply.code(404).send({ error: 'not found' });
+      const { type, feedback } = req.body ?? ({} as any);
+      if (type === 'resume') {
+        if (t.status !== 'blocked') return reply.code(409).send({ error: `仅 blocked 任务可 resume（当前 ${t.status}）` });
+        store.setPendingFeedback(t.id, feedback ?? '请继续');
+        store.setTaskStatus(t.id, 'queued');
+        scheduler.tickNow();
+        return { ok: true, queued: 'resume', task: store.getTask(t.id) };
+      }
+      if (type === 'retry') {
+        if (!['failed', 'blocked', 'done'].includes(t.status)) return reply.code(409).send({ error: '当前状态不可重试' });
+        store.setPendingFeedback(t.id, null);
+        store.setTaskStatus(t.id, 'queued');
+        scheduler.tickNow();
+        return { ok: true, queued: 'retry', task: store.getTask(t.id) };
+      }
+      if (type === 'cancel') {
+        if (t.status === 'running') return reply.code(409).send({ error: 'running 任务暂不支持在线取消（M2: 杀容器）' });
+        store.setTaskStatus(t.id, 'cancelled');
+        return { ok: true, task: store.getTask(t.id) };
+      }
+      return reply.code(400).send({ error: 'type 必须是 resume|retry|cancel' });
+    },
+  );
+
+  // ── runs ──
+  app.get<{ Params: { id: string } }>('/api/runs/:id', async (req, reply) => {
+    const r = store.getRun(Number(req.params.id));
+    if (!r) return reply.code(404).send({ error: 'not found' });
+    let logTail: string[] = [];
+    try { logTail = readFileSync(r.log_path!, 'utf8').split('\n').slice(-50); } catch { /* 无日志 */ }
+    return { run: r, logTail };
+  });
+
+  // ── auth：订阅凭证设备码登录（凭证写进 agent-home 卷） ──
+  app.post<{ Body: { agent_id?: string } }>('/api/auth/login', async (req, reply) => {
+    const agentId = req.body?.agent_id ?? 'codex';
+    const adapter = getAdapterId(agentId, cfg);
+    try { await deps.docker.getVolume(adapter.homeVolume).inspect(); }
+    catch { await deps.docker.createVolume({ Name: adapter.homeVolume }); }
+
+    const container = await deps.docker.createContainer({
+      Image: adapter.image,
+      Cmd: ['codex', 'login', '--device-auth'],
+      Env: ['CODEX_HOME=/codex-home',
+        ...(cfg.proxy.httpsProxy ? [`HTTPS_PROXY=${cfg.proxy.httpsProxy}`, `https_proxy=${cfg.proxy.httpsProxy}`] : [])],
+      Labels: { 'agentdesk.auth': agentId },
+      AttachStdout: true, AttachStderr: true,
+      HostConfig: { Binds: [`${adapter.homeVolume}:/codex-home`] },
+    });
+    await container.start();
+    // 等 10s 抓设备码后返回给调用方，容器留在后台等人完成浏览器授权
+    await new Promise(r => setTimeout(r, 10_000));
+    const logs = await container.logs({ stdout: true, stderr: true });
+    let text = '';
+    (logs as any).on?.('data', (c: Buffer) => { text += c.toString('utf8'); });
+    await new Promise<void>(resolve => {
+      const done = () => resolve();
+      if ((logs as any).once) (logs as any).once('end', done); else done();
+      setTimeout(done, 3_000);
+    });
+    const url = text.match(/https:\/\/auth\.openai\.com[^\s]*/)?.[0];
+    const code = text.match(/\b([A-Z0-9]{4}-[A-Z0-9]{5})\b/)?.[1];
+    void container.wait().then(() => console.log(`🔐 ${agentId} 登录容器已结束`));
+    return { ok: true, url, code, note: '浏览器完成授权后凭证自动落卷，无需其他操作' };
+  });
+
+  return app;
+}
