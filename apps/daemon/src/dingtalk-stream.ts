@@ -78,11 +78,11 @@ export class DingTalkStreamChannel implements FeedbackChannel {
         const connId = (res as any)?.headers?.connectionId as string | undefined;
         // 学习群标识（应用机器人主动推送 groupMessages/send 需要它）
         if (msg.conversationId) learn({ conversationId: msg.conversationId, robotCode: msg.robotCode });
-        // 双保险幂等（两层各自独立集合）：① messageId（钉钉重推同消息）② 内容键（同内容多连接并发投递）
+        // 幂等：按 messageId 去重（钉钉 at-least-once 重推时 mid 相同）。
+        // 注意：不做内容级去重——用户 10 分钟内重发相同指令是正常行为，不能拦。
         const dupByHeader = this.isDuplicate('mid:' + hdrMsgId);
-        const dupByContent = this.isDuplicate(`content:${msg.senderNick}:${content}`);
-        if (dupByHeader || dupByContent) {
-          console.log(`♻️  [dingtalk-stream] 重复投递已忽略 (by=${dupByHeader ? 'mid' : 'content'} mid=${hdrMsgId ?? '-'} conn=${connId ?? '-'})`);
+        if (dupByHeader) {
+          console.log(`♻️  [dingtalk-stream] 重复投递已忽略 (mid=${hdrMsgId ?? '-'} conn=${connId ?? '-'})`);
           return { status: EventAck.SUCCESS };
         }
         console.log(
