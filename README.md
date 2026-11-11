@@ -48,19 +48,18 @@ npm run m0                    # 第二步：完整探针（需要认证，约 3-
 - [ ] M3 钉钉通知 + blocked 反馈续跑闭环
 - [ ] M4 cron 计划 + 额度熔断 + 并发放开（CONCURRENCY）
 
-## M1 用法（Windows 推荐 .cmd 启动器，自动切 UTF-8 防中文乱码）
+## M1 用法
 
 ```bash
-deskd.cmd --data-dir ./data/agentdesk     # 1. 起 daemon（保持运行）
-desk.cmd project add demo D:/work/demo    # 2. 注册项目（任意 git 仓库的本地路径）
-desk.cmd auth codex                       # 3. 首次：设备码登录（浏览器授权，凭证落卷）
-desk.cmd run demo "给 README 补一节 FAQ"  # 4. 挂任务（离线时按队列自动推进）
-desk.cmd status                           # 5. 看队列；desk.cmd status <id> 看总结
-desk.cmd resume <id> "按方案B继续"        # 阻塞后带反馈续跑（同一会话上下文）
+npm run daemon -- --data-dir ./data/agentdesk   # 1. 起 daemon（保持运行）
+npm run desk -- project add demo D:/work/demo   # 2. 注册项目（任意 git 仓库的本地路径）
+npm run desk -- auth codex                      # 3. 首次：设备码登录（浏览器授权，凭证落卷）
+npm run desk -- run demo "给 README 补一节 FAQ" # 4. 挂任务（离线时按队列自动推进）
+npm run desk -- status                          # 5. 看队列；status <id> 看总结
+npm run desk -- resume <id> "按方案B继续"       # 阻塞后带反馈续跑（同一会话上下文）
 ```
 
-Linux/macOS/Git Bash 等价命令：`npm run daemon` / `npm run desk -- <命令>`。
-裸终端中文乱码时：`chcp 65001`，或直接用 .cmd 启动器。
+注意：往 API 提交中文请走 CLI（Node fetch，UTF-8 安全）；裸 `curl -d` 在 GBK 控制台会把中文打坏。
 
 ## 目录
 
