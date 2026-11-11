@@ -45,8 +45,20 @@ function parseCommand(raw: string): FeedbackAction {
 export class DingTalkStreamChannel implements FeedbackChannel {
   readonly name = 'dingtalk-stream';
   private client?: DWClient;
+  /** 钉钉 Stream 是 at-least-once 投递：按 messageId 幂等去重 */
+  private seenMessages = new Map<string, number>();
 
   constructor(private cfg: { clientId: string; clientSecret: string }) {}
+
+  private isDuplicate(messageId: string | undefined): boolean {
+    if (!messageId) return false;
+    // 顺带清理 10 分钟前的旧 id，防集合无限增长
+    const now = Date.now();
+    for (const [k, t] of this.seenMessages) if (now - t > 600_000) this.seenMessages.delete(k);
+    if (this.seenMessages.has(messageId)) return true;
+    this.seenMessages.set(messageId, now);
+    return false;
+  }
 
   async start(
     dispatch: (a: FeedbackAction) => Promise<{ ok: boolean; message: string }>,
@@ -62,6 +74,8 @@ export class DingTalkStreamChannel implements FeedbackChannel {
         const content = msg.text?.content ?? '';
         // 学习群标识（应用机器人主动推送 groupMessages/send 需要它）
         if (msg.conversationId) learn({ conversationId: msg.conversationId, robotCode: msg.robotCode });
+        // at-least-once 幂等：钉钉重推同一消息时只处理一次
+        if (this.isDuplicate((res as any)?.headers?.messageId)) return { status: EventAck.SUCCESS };
         if (!content.trim()) return { status: EventAck.SUCCESS };
         console.log(`📥 [dingtalk-stream] ${msg.senderNick ?? '?'}: ${content.slice(0, 60)}`);
 
