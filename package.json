@@ -17,6 +17,7 @@
     "m0:login": "bash scripts/m0.sh login",
     "daemon": "tsx apps/daemon/src/index.ts",
     "desk": "tsx apps/cli/src/index.ts",
+    "web": "npm run dev -w apps/web",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,0 +1,49 @@
+/** 前端共享类型与 API 客户端（与 daemon REST 一一对应） */
+
+export type TaskStatus = 'queued' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
+
+export interface Project {
+  id: number; name: string; workspace_path: string;
+  agent_id: string; created_at: string;
+}
+export interface Task {
+  id: number; project_id: number; prompt: string;
+  status: TaskStatus; pending_feedback: string | null; created_at: string;
+}
+export interface Run {
+  id: number; task_id: number; kind: 'normal' | 'resume';
+  session_id?: string; status: string; exit_code?: number;
+  blocked_kind?: string; log_path?: string; summary_json?: string;
+  started_at?: string; ended_at?: string;
+}
+
+async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  return data as T;
+}
+
+export const client = {
+  projects: () => api<{ projects: Project[] }>('GET', '/api/projects'),
+  tasks: () => api<{ tasks: Task[] }>('GET', '/api/tasks'),
+  task: (id: number) => api<{ task: Task; runs: Run[] }>('GET', `/api/tasks/${id}`),
+  run: (id: number) => api<{ run: Run; logTail: string[] }>('GET', `/api/runs/${id}`),
+  createTask: (project: string | number, prompt: string) =>
+    api<{ task: Task }>('POST', '/api/tasks', { project, prompt }),
+  action: (id: number, type: string, feedback?: string) =>
+    api<{ ok: boolean; message?: string }>('POST', `/api/tasks/${id}/actions`, { type, feedback }),
+};
+
+export const STATUS_META: Record<TaskStatus, { label: string; color: string; bg: string }> = {
+  queued:   { label: '🕐 排队',   color: '#8a6d00', bg: '#fff6d9' },
+  running:  { label: '🔄 运行中', color: '#0b62d6', bg: '#e3f0ff' },
+  blocked:  { label: '⚠️ 阻塞',   color: '#ad5f00', bg: '#ffeccd' },
+  done:     { label: '✅ 完成',   color: '#1a7f37', bg: '#e2f5e8' },
+  failed:   { label: '❌ 失败',   color: '#c01d2e', bg: '#fde8ea' },
+  cancelled:{ label: '🚫 取消',   color: '#57606a', bg: '#eef0f2' },
+};
