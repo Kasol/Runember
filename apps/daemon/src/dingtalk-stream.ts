@@ -106,13 +106,18 @@ export class DingTalkStreamChannel implements FeedbackChannel {
 
   /** 通过消息自带的 sessionWebhook 回复（临时口，无需 accessToken） */
   private async reply(sessionWebhook: string | undefined, text: string): Promise<void> {
-    if (!sessionWebhook) return;
+    if (!sessionWebhook) {
+      console.warn('[dingtalk-stream] 无 sessionWebhook，跳过回复');
+      return;
+    }
     try {
-      await fetch(sessionWebhook, {
+      const res = await fetch(sessionWebhook, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ msgtype: 'markdown', markdown: { title: 'agentdesk', text } }),
       });
+      const body = await res.json() as { errcode?: number; errmsg?: string };
+      console.log(`📤 [dingtalk-stream] 回复结果: HTTP ${res.status} errcode=${body.errcode} ${body.errmsg ?? ''}`);
     } catch (e: any) {
       console.error('[dingtalk-stream] 回复失败:', e?.message ?? e);
     }
