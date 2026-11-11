@@ -138,7 +138,7 @@ export class Runner {
       });
       if (auth.exitCode !== 0) {
         return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-          { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath);
+          { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath, auth.exitCode);
       }
 
       // ② checkpoint：把当前工作树（含用户未提交 WIP）钉成回滚锚点
@@ -203,28 +203,31 @@ export class Runner {
         errTail: main.err.slice(-20).join('\n'),
       });
       const summary: RunSummary = { agentMessage: lastAgentText || undefined, filesChanged, diffStat, sessionId };
-      this.finish(task, project, run.id, result, summary, logPath);
+      this.finish(task, project, run.id, result, summary, logPath, main.exitCode);
     } catch (e: any) {
       this.finish(task, project, run.id,
         { status: 'failed', blockedKind: 'unknown_error' },
-        { agentMessage: `runner 异常: ${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath);
+        { agentMessage: `runner 异常: ${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath, undefined);
     }
   }
 
   private finish(
     task: Task, project: Project, runId: number,
-    result: ReturnType<typeof classifyRun>, summary: RunSummary, logPath: string,
+    result: ReturnType<typeof classifyRun>, summary: RunSummary, logPath: string, exitCode?: number,
   ): void {
     const { store, events } = this.deps;
     store.updateRun(runId, {
       status: result.status,
+      exit_code: exitCode,
       blocked_kind: result.blockedKind,
       summary_json: JSON.stringify(summary),
       ended_at: new Date().toISOString(),
       log_path: logPath,
     });
-    const next = taskStatusAfterRun(task, store.getRun(runId)!, result);
-    store.setTaskStatus(task.id, next);
+    // 人工取消过的任务不再被 Run 终态覆盖
+    if (store.getTask(task.id)?.status !== 'cancelled') {
+      store.setTaskStatus(task.id, taskStatusAfterRun(task, store.getRun(runId)!, result));
+    }
 
     if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', task, project, summary });
     else if (result.status === 'blocked') {
