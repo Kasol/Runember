@@ -72,12 +72,20 @@ export class DingTalkStreamChannel implements FeedbackChannel {
       try {
         const msg: IncomingMessage = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
         const content = msg.text?.content ?? '';
+        const hdrMsgId = (res as any)?.headers?.messageId as string | undefined;
+        const connId = (res as any)?.headers?.connectionId as string | undefined;
         // 学习群标识（应用机器人主动推送 groupMessages/send 需要它）
         if (msg.conversationId) learn({ conversationId: msg.conversationId, robotCode: msg.robotCode });
-        // at-least-once 幂等：钉钉重推同一消息时只处理一次
-        if (this.isDuplicate((res as any)?.headers?.messageId)) return { status: EventAck.SUCCESS };
-        if (!content.trim()) return { status: EventAck.SUCCESS };
-        console.log(`📥 [dingtalk-stream] ${msg.senderNick ?? '?'}: ${content.slice(0, 60)}`);
+        // 双保险幂等：① messageId（钉钉重推同消息）② 内容键（同内容多连接并发投递）
+        const dupByHeader = this.isDuplicate(hdrMsgId);
+        const dupByContent = this.isDuplicate(`content:${msg.senderNick}:${content}`);
+        if (dupByHeader || dupByContent) {
+          console.log(`♻️  [dingtalk-stream] 重复投递已忽略 (mid=${hdrMsgId ?? '-'} conn=${connId ?? '-'})`);
+          return { status: EventAck.SUCCESS };
+        }
+        console.log(
+          `📥 [dingtalk-stream] ${msg.senderNick ?? '?'} (mid=${hdrMsgId?.slice(0, 8)} conn=${connId?.slice(0, 8)}): ${content.slice(0, 60)}`,
+        );
 
         const action = parseCommand(content);
         const result = await dispatch(action);
