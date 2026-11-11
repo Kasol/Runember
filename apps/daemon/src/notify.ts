@@ -1,10 +1,13 @@
 /**
  * 通知层：daemon 只发领域事件（NotifyEvent），Notifier 实现决定发到哪。
- * M1 = ConsoleNotifier（终端打印）；M3 = DingTalkNotifier（加配置即启用，零核心改动）。
- * 防骚扰策略（同 Task 同 blocked_kind 30min 去重）做在这层的基类里，渠道实现不重复写。
+ * M1 = ConsoleNotifier；M3 = DingTalkNotifier（配置 notify.channels 即启用）。
  */
 import { EventEmitter } from 'node:events';
 import type { Notifier, NotifyEvent } from '@agentdesk/core';
+import { DedupedNotifier } from './notify-base.js';
+import { DingTalkNotifier } from './dingtalk.js';
+
+export { DedupedNotifier };
 
 export class EventBus {
   private bus = new EventEmitter();
@@ -20,22 +23,6 @@ export class EventBus {
   emit(event: NotifyEvent): void {
     this.bus.emit('event', event);
   }
-}
-
-/** 去重基类：同一任务同一事件类别在窗口期内只放行一次 */
-export abstract class DedupedNotifier implements Notifier {
-  abstract readonly name: string;
-  private lastAt = new Map<string, number>();
-  constructor(private windowMs = 30 * 60 * 1000) {}
-
-  async notify(event: NotifyEvent): Promise<void> {
-    const key = `${event.task.id}:${event.kind}`;
-    const now = Date.now();
-    if (now - (this.lastAt.get(key) ?? 0) < this.windowMs) return;
-    this.lastAt.set(key, now);
-    await this.send(event);
-  }
-  protected abstract send(event: NotifyEvent): Promise<void>;
 }
 
 export class ConsoleNotifier extends DedupedNotifier {
@@ -61,12 +48,24 @@ export class ConsoleNotifier extends DedupedNotifier {
   }
 }
 
-/** M3 预告：DingTalkNotifier 只需继承 DedupedNotifier 实现 send()，配置 notify.channels 即启用 */
-export function buildNotifiers(channels: Array<Record<string, unknown>>): Notifier[] {
+/** 渠道工厂：按 notify.channels[].type 装配。新增渠道（企微/邮件/…）= 在这里加一个 case */
+export function buildNotifiers(
+  channels: Array<Record<string, unknown>>,
+  publicUrl: string,
+): Notifier[] {
   const list: Notifier[] = [new ConsoleNotifier()];
   for (const ch of channels) {
-    // switch ((ch as any).type) { case 'dingtalk-webhook': list.push(new DingTalkNotifier(...)); }
-    void ch;
+    if (ch.type === 'dingtalk-webhook') {
+      const token = String(ch.access_token ?? '');
+      if (!token) { console.warn('[notify] dingtalk 渠道缺少 access_token，已跳过'); continue; }
+      list.push(new DingTalkNotifier(
+        { access_token: token, secret: ch.secret ? String(ch.secret) : undefined,
+          events: ch.events as string[] | undefined, atAll: !!ch.atAll },
+        publicUrl,
+      ));
+    } else {
+      console.warn(`[notify] 未知渠道类型: ${String(ch.type)}，已跳过`);
+    }
   }
   return list;
 }

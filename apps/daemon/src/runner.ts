@@ -10,7 +10,7 @@ import Docker from 'dockerode';
 import { Writable } from 'node:stream';
 import { appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyRun, taskStatusAfterRun } from '@agentdesk/core';
+import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
 import type { Task, Project, RunSummary } from '@agentdesk/core';
 
@@ -231,7 +231,15 @@ export class Runner {
 
     if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', task, project, summary });
     else if (result.status === 'blocked') {
-      const question = summary.agentMessage?.split('\n').find(l => l.includes('###AGENTCTL_BLOCKED###'))?.slice(0, 300);
+      // 从协议标记行提取人话问题：###AGENTCTL_BLOCKED### {"question":"..."}
+      let question: string | undefined;
+      const markerLine = summary.agentMessage?.split('\n').find(l => l.includes(AGENTCTL_MARKER));
+      if (markerLine) {
+        try {
+          const j = JSON.parse(markerLine.slice(markerLine.indexOf(AGENTCTL_MARKER) + AGENTCTL_MARKER.length).trim());
+          question = typeof j.question === 'string' ? j.question : typeof j.reason === 'string' ? j.reason : undefined;
+        } catch { question = markerLine.slice(0, 300); }
+      }
       events.emit({ kind: 'run.blocked', task, project, blockedKind: result.blockedKind!, question });
     } else events.emit({ kind: 'run.failed', task, project, reason: summary.agentMessage ?? 'unknown' });
   }

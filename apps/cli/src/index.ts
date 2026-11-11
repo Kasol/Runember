@@ -98,6 +98,13 @@ async function main(): Promise<void> {
       await api('POST', `/api/tasks/${rest[0]}/actions`, { type: 'cancel' });
       console.log('🚫 已取消'); return;
     }
+    case 'notify-test': {
+      const r = await api('POST', '/api/notify/test');
+      for (const res of r.results) {
+        console.log(res.ok ? `✅ ${res.channel} 通路正常` : `❌ ${res.channel}: ${res.error}`);
+      }
+      process.exit(r.results.every((x: any) => x.ok) ? 0 : 1);
+    }
     case 'auth': {
       const agent_id = rest[0] ?? 'codex';
       const r = await api('POST', '/api/auth/login', { agent_id });

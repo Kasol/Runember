@@ -5,15 +5,16 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import { availableAgents } from '@agentdesk/adapters';
 import { readFileSync } from 'node:fs';
-import type { TaskStatus } from '@agentdesk/core';
+import type { Notifier, TaskStatus } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
+import { DingTalkNotifier } from './dingtalk.js';
 import Docker from 'dockerode';
 
 export function buildServer(deps: {
-  cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker;
+  cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker; notifiers: Notifier[];
 }): FastifyInstance {
   const { cfg, store, scheduler } = deps;
   const app = Fastify({ logger: false });
@@ -26,6 +27,23 @@ export function buildServer(deps: {
   });
 
   app.get('/healthz', async () => ({ ok: true, ts: Date.now() }));
+
+  /** 通知通路测试：向所有已配置的外部渠道直接发一条测试消息 */
+  app.post('/api/notify/test', async (_req, reply) => {
+    const dings = deps.notifiers.filter((n): n is DingTalkNotifier => n instanceof DingTalkNotifier);
+    if (!dings.length) return reply.code(400).send({ error: '未配置任何外部通知渠道（notify.channels）' });
+    const results: Array<{ channel: string; ok: boolean; error?: string }> = [];
+    for (const d of dings) {
+      try {
+        await d.sendRaw('🧪 agentdesk 通路测试',
+          '### 🧪 agentdesk 通路测试\n\n收到这条消息 = 钉钉通知链路已打通 ✅');
+        results.push({ channel: d.name, ok: true });
+      } catch (e: any) {
+        results.push({ channel: d.name, ok: false, error: e?.message ?? String(e) });
+      }
+    }
+    return { results };
+  });
 
   app.get('/api/agents', async () => ({ agents: availableAgents() }));
 

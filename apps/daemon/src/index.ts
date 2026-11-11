@@ -38,11 +38,12 @@ async function main(): Promise<void> {
   if (cfg.proxy.httpsProxy) console.log(`  容器代理=${cfg.proxy.httpsProxy}`);
 
   const store = new Store(cfg.dataDir);
-  const events = new EventBus(buildNotifiers(cfg.notify.channels));
+  const notifiers = buildNotifiers(cfg.notify.channels, cfg.server.publicUrl);
+  const events = new EventBus(notifiers);
   const docker = new Docker();
   const runner = new Runner({ docker, cfg, store, events });
   const scheduler = new Scheduler(cfg, store, runner);
-  const app = buildServer({ cfg, store, scheduler, docker });
+  const app = buildServer({ cfg, store, scheduler, docker, notifiers });
 
   await app.listen({ host: cfg.server.host, port: cfg.server.port });
   console.log(`✅ API 就绪 http://${cfg.server.host}:${cfg.server.port}（token 鉴权${cfg.server.token ? '开' : '关'}）`);

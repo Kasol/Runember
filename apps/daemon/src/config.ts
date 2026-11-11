@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export interface AppConfig {
-  server: { host: string; port: number; token: string };
+  server: { host: string; port: number; token: string; publicUrl: string };
   scheduler: { concurrency: number; tickMs: number; taskTimeoutMin: number };
   /** agent 配置是开放字典：注册表里有什么 id，这里就能配什么 */
   agents: Record<string, { image: string; codexHomeVolume: string }>;
@@ -18,7 +18,7 @@ export interface AppConfig {
 }
 
 const DEFAULTS: AppConfig = {
-  server: { host: '127.0.0.1', port: 8787, token: '' },
+  server: { host: '127.0.0.1', port: 8787, token: '', publicUrl: '' },
   scheduler: { concurrency: 1, tickMs: 5000, taskTimeoutMin: 30 },
   agents: {
     codex: { image: 'agentdesk/runner-codex:m0', codexHomeVolume: 'agentdesk-codex-home' },
