@@ -1,6 +1,6 @@
 {
   "name": "agentdesk",
-  "version": "0.0.1",
+  "version": "2.1.0",
   "private": true,
   "description": "无人值守 Agent 工作台：调度 Codex 等 CLI Agent，阻塞通知到钉钉，反馈后续跑",
   "type": "module",
