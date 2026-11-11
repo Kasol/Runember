@@ -24,6 +24,23 @@ function badge(status: string): string {
 /** 截断一行文本 */
 const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s);
 
+/** 解析 "run [项目名] 描述" —— 项目名不含空格；首词若匹配已注册项目名则为项目 */
+function parseRunCommand(
+  raw: string,
+  store: Store,
+): { type: 'run'; projectId?: number; prompt: string } | null {
+  const s = raw.trim().replace(/^@\S+\s*/, '');
+  const m = s.match(/^(?:run|派任务|执行)\s+(.+)$/i);
+  if (!m) return null;
+  const rest = m[1]!.trim();
+  const firstSpace = rest.indexOf(' ');
+  if (firstSpace < 0) return { type: 'run', prompt: rest }; // 只有描述，无项目词
+  const maybeProject = rest.slice(0, firstSpace);
+  const project = store.findProject(maybeProject);
+  if (project) return { type: 'run', projectId: project.id, prompt: rest.slice(firstSpace + 1).trim() };
+  return { type: 'run', prompt: rest };
+}
+
 export async function applyTaskAction(
   store: Store,
   scheduler: Scheduler,
@@ -51,6 +68,45 @@ export async function applyTaskAction(
     return { ok: true, message: md };
   }
 
+  if (action.type === 'run') {
+    // 手机派单：run [项目名] <描述>；项目省略时——仅注册了一个项目则用它，多个则列清单
+    // prompt 首词若恰好是已注册项目名则视为项目名（如 "run selftest 修bug"），否则整句是描述
+    const all = store.listProjects();
+    if (!all.length) return { ok: false, message: '尚未注册任何项目（先在机器上 desk project add）' };
+    let projectId = action.projectId;
+    let prompt = action.prompt ?? '';
+    if (all.length > 1 && !projectId) {
+      const firstWord = prompt.split(/\s+/)[0] ?? '';
+      const hit = store.findProject(firstWord);
+      if (hit) {
+        projectId = hit.id;
+        prompt = prompt.slice(firstWord.length).trim();
+      }
+    }
+    if (!projectId && all.length === 1) projectId = all[0]!.id;
+    if (!projectId) {
+      return {
+        ok: false,
+        message: br('**有多个项目，请带项目名：**') + br() +
+          all.map(p => br(`- \`run ${p.name} <描述>\``)).join(''),
+      };
+    }
+    const project = store.getProject(projectId);
+    if (!project) return { ok: false, message: '项目不存在' };
+    if (!prompt.trim()) return { ok: false, message: '任务描述不能为空：`run <项目> <描述>`' };
+    const newTask = store.addTask(project.id, prompt);
+    scheduler.tickNow();
+    return {
+      ok: true,
+      message: br('### 📋 任务已入队') +
+        br() +
+        br(`**#${newTask.id}** → 项目 \`${project.name}\``) +
+        br(cut(prompt, 60)) +
+        br() +
+        br('调度器将在数秒内拾取执行。'),
+    };
+  }
+
   if (action.type === 'help') {
     const cmd = (c: string, desc: string) => br(`- \`${c}\` — ${desc}`);
     return {
@@ -58,13 +114,14 @@ export async function applyTaskAction(
       message:
         br('### 🤖 agentdesk 指令') +
         br() +
+        cmd('run <项目> <任务描述>', '派发新任务（项目名可省，默认唯一注册项目）') +
         cmd('resume [编号] <决定>', '阻塞任务带决定续跑（仅一个阻塞任务时可省编号）') +
         cmd('retry <编号>', '重新执行该任务') +
         cmd('cancel <编号>', '取消任务') +
         cmd('status', '查看队列与执行进度') +
         br() +
-        br('💡 中英文指令均可（继续/重试/取消/状态）。' +
-           '任务阻塞时直接回复决定即可，例：`resume 可以上线，注意回滚`'),
+        br('💡 中英文指令均可（派任务/继续/重试/取消/状态）。' +
+           '示例：`run myproj 给登录接口加限流`'),
     };
   }
 

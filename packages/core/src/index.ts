@@ -198,9 +198,12 @@ export interface ExecutionBackend {
 
 /** 人从远端（IM/网页/…）发回的指令 */
 export interface FeedbackAction {
-  type: 'resume' | 'retry' | 'cancel' | 'status' | 'help';
+  type: 'resume' | 'retry' | 'cancel' | 'status' | 'help' | 'run';
   taskId?: number;
   feedback?: string;
+  /** run 指令：新任务描述与目标项目 */
+  prompt?: string;
+  projectId?: number;
 }
 
 /**
