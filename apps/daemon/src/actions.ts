@@ -65,14 +65,13 @@ export async function applyTaskAction(
   }
 
   if (action.type === 'detail') {
-    // 详情列表：钉钉手机屏一行约 20-24 字符，"徽章+编号+长描述"挤一行必截断。
-    // 改为两行式：短行（徽章+编号+项目）+ 独立描述行（≤22字），任何屏幕完整显示。
-    // 只取 6 条（6×3行=18 行，仍在折叠预算内）。
+    // 详情列表：两行式（编号行 + 描述行）。实测钉钉手机一行约可容纳 24-26 个
+    // 中文字符（#15 的 20 字完整显示），故描述限 40 字——绝大多数完整，超长才截。
     const all = store.listTasks().slice(0, 6);
     let md = br('### 📋 任务列表（最新 6 条）');
     for (const t of all) {
       md += br() + br(`${badge(t.status)} **#${t.id}**`);
-      md += br(`　${cut(t.prompt, 22)}`);
+      md += br(`　${cut(t.prompt, 40)}`);
     }
     md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
     return { ok: true, message: md };
