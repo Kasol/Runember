@@ -4,12 +4,13 @@
  */
 import Fastify, { FastifyInstance } from 'fastify';
 import { availableAgents } from '@agentdesk/adapters';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import type { Notifier, TaskStatus } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
+import { hostGitAvailable, setupProjectGit } from './hostgit.js';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
@@ -57,7 +58,20 @@ export function buildServer(deps: {
       if (!name || !workspace_path) return reply.code(400).send({ error: 'name 与 workspace_path 必填' });
       if (!availableAgents().includes(agent_id)) return reply.code(400).send({ error: `未知 agent: ${agent_id}` });
       if (store.findProject(name)) return reply.code(409).send({ error: `项目名已存在: ${name}` });
-      return reply.code(201).send({ project: store.addProject(name, workspace_path, agent_id) });
+      if (!existsSync(workspace_path)) return reply.code(400).send({ error: `路径不存在: ${workspace_path}` });
+
+      // 宿主环境防护：git 可用性 + 仓库级配置自动化（用户零心智负担）
+      const gitInfo = await hostGitAvailable();
+      if (!gitInfo.ok) {
+        return reply.code(400).send({ error: '宿主机未安装 git —— agentdesk 的安全网（checkpoint）依赖它。请安装 git 后重试。' });
+      }
+      const gitCfg = await setupProjectGit(workspace_path);
+
+      const project = store.addProject(name, workspace_path, agent_id);
+      return reply.code(201).send({
+        project,
+        git: { version: gitInfo.version, config: gitCfg.message },
+      });
     },
   );
 

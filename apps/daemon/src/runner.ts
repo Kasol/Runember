@@ -12,6 +12,7 @@ import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
+import { hostCheckpoint, hostAudit } from './hostgit.js';
 import type { Task, Project, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -172,18 +173,13 @@ export class Runner {
           { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath, auth.exitCode);
       }
 
-      // ② checkpoint：把当前工作树（含用户未提交 WIP）钉成回滚锚点
-      const checkpoint = await this.spawn({
-        image: adapter.image,
-        cmd: ['/bin/sh', '-c',
-          'git rev-parse HEAD 2>/dev/null || echo NO-GIT; ' +
-          'git -c user.name=agentdesk -c user.email=agentdesk@local -c core.filemode=false add -A 2>/dev/null; ' +
-          'git -c user.name=agentdesk -c user.email=agentdesk@local -c core.filemode=false commit -qm "agentdesk: pre-task checkpoint (task-' + task.id + ')" 2>/dev/null; ' +
-          'git rev-parse HEAD'],
-        binds, env: [], timeoutMs: 120_000, tag: `ckpt-${run.id}`,
-      });
-      const anchor = checkpoint.out.at(-1)?.trim() ?? '';
-      const hasGit = anchor !== 'NO-GIT' && /^[0-9a-f]{7,40}$/.test(anchor);
+      // ② checkpoint：宿主侧执行（继承用户 LFS/filemode 配置，容器不再触碰 .git）
+      const cp = await hostCheckpoint(project.workspace_path, task.id);
+      if (!cp.ok) {
+        return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'unknown_error' },
+          { agentMessage: `checkpoint 失败：${cp.error}`, filesChanged: [], diffStat: '' }, logPath, undefined);
+      }
+      const anchor = cp.anchor;
 
       // ③ 主执行：resume（带反馈+旧会话）或 normal
       const priorSession = kind === 'resume' ? store.lastSessionOfTask(task.id) : undefined;
@@ -206,25 +202,10 @@ export class Runner {
       for (const l of main.err) appendFileSync(logPath, '[stderr] ' + l + '\n');
       if (sessionId) store.updateRun(run.id, { session_id: sessionId });
 
-      // ④ 收尾审计：本任务改了哪些文件（相对 checkpoint）
-      let filesChanged: string[] = [];
-      let diffStat = '';
-      if (hasGit) {
-        const post = await this.spawn({
-          image: adapter.image,
-          cmd: ['/bin/sh', '-c',
-            `echo '---PORCELAIN---'; git -c core.filemode=false status --porcelain; ` +
-            `echo '---DIFFSTAT---'; git -c core.filemode=false diff --stat ${anchor}..HEAD | tail -5`],
-          binds, env: [], timeoutMs: 60_000, tag: `post-${run.id}`,
-        });
-        const text = post.out.join('\n');
-        const p = text.indexOf('---PORCELAIN---');
-        const d = text.indexOf('---DIFFSTAT---');
-        if (p >= 0 && d > p) {
-          filesChanged = text.slice(p + 15, d).split('\n').map(s => s.trim()).filter(Boolean);
-          diffStat = text.slice(d + 14).trim();
-        }
-      }
+      // ④ 收尾审计：宿主侧执行（相对 checkpoint 的改动清单）
+      const audit = await hostAudit(project.workspace_path, anchor);
+      const filesChanged = audit.filesChanged;
+      const diffStat = audit.diffStat;
 
       // ⑤ 终态判定
       const result = classifyRun({
@@ -270,6 +251,15 @@ export class Runner {
           const j = JSON.parse(markerLine.slice(markerLine.indexOf(AGENTCTL_MARKER) + AGENTCTL_MARKER.length).trim());
           question = typeof j.question === 'string' ? j.question : typeof j.reason === 'string' ? j.reason : undefined;
         } catch { question = markerLine.slice(0, 300); }
+      }
+      // 循环熔断：60 分钟内该任务 blocked ≥3 次 → 不再自动接受 resume 循环，
+      // 通知升级为"需要人工介入环境"，防止昨晚式 20 连问
+      const recentBlocks = store.runsOfTask(task.id)
+        .filter(r => r.status === 'blocked' && r.ended_at
+          && Date.now() - new Date(r.ended_at).getTime() < 60 * 60 * 1000).length;
+      const loopCount = recentBlocks; // 含本次
+      if (loopCount >= 3) {
+        question = `⏸️ 该任务 1 小时内已阻塞 ${loopCount} 次（环境问题循环）。\n\n最新问题：${question ?? '（见日志）'}\n\n建议：先修复环境（缺工具/缺依赖/MCP 未接入）再 resume；或 resume 时明确授权降级方案。`;
       }
       events.emit({ kind: 'run.blocked', task, project, blockedKind: result.blockedKind!, question });
     } else events.emit({ kind: 'run.failed', task, project, reason: summary.agentMessage ?? 'unknown' });
