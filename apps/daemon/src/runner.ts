@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
+import { renderMcpToml, writeMcpToVolume } from './mcp.js';
 import type { Task, Project, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -188,8 +189,18 @@ export class Runner {
     const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
 
     try {
-      // ① 播种宿主 skills（若有）→ 项目级依赖预装（extraPackages）→ 凭证自检
+      // ① 播种宿主 skills（若有）→ MCP 声明渲染 → 项目级依赖预装 → 凭证自检
       await this.seedSkills(adapter.homeVolume);
+      const mcp = (project as any).mcpServers as string[] | undefined;
+      if (mcp?.length) {
+        const registry = (cfg.agents[project.agent_id] as any)?.mcp ?? {};
+        const { toml, written, skipped } = renderMcpToml(mcp, registry);
+        await writeMcpToVolume(this.deps.docker, adapter.homeVolume, toml);
+        if (skipped.length) {
+          console.warn(`[mcp] 未在注册表中的 MCP 声明已跳过: ${skipped.join(', ')}（cfg.agents.${project.agent_id}.mcp）`);
+        }
+        if (written.length) console.log(`🔌 MCP 已注入容器配置: ${written.join(', ')}`);
+      }
       const extra = (project as any).extraPackages as string[] | undefined;
       if (extra?.length) {
         // 项目专属镜像替代基础镜像执行本次 run（依赖内置于镜像，容器销毁不丢失）

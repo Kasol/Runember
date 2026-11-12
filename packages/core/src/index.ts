@@ -39,6 +39,8 @@ export interface Project {
   agent_id: AgentId;
   /** 项目级系统依赖声明（依赖三层通道：宿主 daemon 预装进项目专属镜像） */
   extraPackages?: string[];
+  /** 项目声明的 MCP server 名（daemon 渲染进容器 config.toml，agent 会话内可用） */
+  mcpServers?: string[];
   created_at: string;
 }
 
