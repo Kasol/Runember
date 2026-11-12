@@ -211,10 +211,10 @@ export interface ExecutionBackend {
 
 /** 人从远端（IM/网页/…）发回的指令 */
 export interface FeedbackAction {
-  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run';
+  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run' | 'draft';
   taskId?: number;
   feedback?: string;
-  /** run 指令：新任务描述与目标项目 */
+  /** run/draft 指令：任务描述（或纯数字 = 引用已有任务编号）与目标项目 */
   prompt?: string;
   projectId?: number;
 }

@@ -32,8 +32,9 @@ function parseCommand(raw: string, store?: unknown): FeedbackAction {
   if (/^(status|状态|队列)$/i.test(s)) return { type: 'status' };
   if (/^(detail|详情|明细|列表)$/i.test(s)) return { type: 'detail' };
   if (/^(help|帮助|\?|？)$/i.test(s)) return { type: 'help' };
-  // run 派单：语法在 applyTaskAction 内解析（需要查询项目表），这里只识别动词
-  if (/^(run|派任务|执行)\s/i.test(s)) return { type: 'run', prompt: s.replace(/^(?:run|派任务|执行)\s+/i, '') };
+  // draft 建草稿（不执行）；run/执行 是"执行动作"（把草稿/新描述转正入队）
+  if (/^(draft|草稿)\s/i.test(s)) return { type: 'draft', prompt: s.replace(/^(?:draft|草稿)\s+/i, '') };
+  if (/^(run|执行|派任务)\s/i.test(s)) return { type: 'run', prompt: s.replace(/^(?:run|执行|派任务)\s+/i, '') };
 
   // resume 可省编号：单阻塞任务时自动指向它（applyTaskAction 内解析歧义）
   let m = s.match(/^(?:resume|继续|恢复)\s*(?:#?(\d+))?\s*[:：,，]?\s*([\s\S]*)$/i);

@@ -82,9 +82,8 @@ export async function applyTaskAction(
     return { ok: true, message: md };
   }
 
-  if (action.type === 'run') {
-    // 手机派单：run [项目名] <描述>；项目省略时——仅注册了一个项目则用它，多个则列清单
-    // prompt 首词若恰好是已注册项目名则视为项目名（如 "run selftest 修bug"），否则整句是描述
+  if (action.type === 'draft') {
+    // 建草稿（不执行）：draft [项目名] <描述>；Web/钉钉均以 draft 为唯一创建入口
     const all = store.listProjects();
     if (!all.length) return { ok: false, message: '尚未注册任何项目（先在机器上 desk project add）' };
     let projectId = action.projectId;
@@ -98,6 +97,88 @@ export async function applyTaskAction(
       }
     }
     if (!projectId && all.length === 1) projectId = all[0]!.id;
+    if (!projectId) {
+      return {
+        ok: false,
+        message: br('**有多个项目，请带项目名：**') + br() +
+          all.map(p => br(`- \`draft ${p.name} <描述>\``)).join(''),
+      };
+    }
+    const project = store.getProject(projectId);
+    if (!project) return { ok: false, message: '项目不存在' };
+    if (!prompt.trim()) return { ok: false, message: '任务描述不能为空：`draft <项目> <描述>`' };
+    const t = store.addTask(project.id, prompt, { draft: true });
+    return {
+      ok: true,
+      message: br('### 📝 草稿已创建') +
+        br() +
+        br(`**#${t.id}** → 项目 \`${project.name}\``) +
+        br(cut(prompt, 60)) +
+        br() +
+        br(`执行：\`run ${t.id}\`（Web 草稿队列也可编辑后再执行）`),
+    };
+  }
+
+  if (action.type === 'run') {
+    // run = 执行动作（不创建）：三种形态
+    //   run <数字>            执行草稿/已存在任务 #数字（可 resume blocked、可入队 draft）
+    //   run <数字> <补充文字>   同上，并把补充文字合入任务描述
+    //   run [项目名] <描述>    全新任务，直接入队执行
+    const all = store.listProjects();
+    const raw = action.prompt ?? '';
+    let projectId = action.projectId;
+    let prompt = raw;
+    let refId: number | undefined;
+
+    // 形态判定：首 token 是纯数字 → 任务引用
+    const numMatch = raw.match(/^#?(\d+)\s*([\s\S]*)$/);
+    if (numMatch) {
+      refId = Number(numMatch[1]);
+      prompt = numMatch[2]!.trim();
+    } else if (all.length > 1) {
+      const firstWord = raw.split(/\s+/)[0] ?? '';
+      const hit = store.findProject(firstWord);
+      if (hit) {
+        projectId = hit.id;
+        prompt = raw.slice(firstWord.length).trim();
+      }
+    }
+    if (!projectId && all.length === 1) projectId = all[0]!.id;
+
+    // ── 形态一：引用已有任务（草稿执行 / blocked resume / 其他状态提示）──
+    if (refId !== undefined) {
+      const t = store.getTask(refId);
+      if (!t) return { ok: false, message: `任务 #${refId} 不存在` };
+
+      // 补充文字合入描述（草稿完善 / 给 blocked 任务追加信息）
+      if (prompt && t.prompt !== prompt) {
+        store.updateTaskPrompt(refId, t.prompt + (t.prompt ? '\n' : '') + prompt);
+      }
+
+      if (t.status === 'draft') {
+        store.setTaskStatus(refId, 'queued');
+        scheduler.tickNow();
+        return {
+          ok: true,
+          message: br(`### ▶️ 草稿 #${refId} 已入队执行`) +
+            br() +
+            br(`项目 \`${projectName(t.project_id)}\``) +
+            br(cut(prompt ? t.prompt + '\n+ ' + prompt : t.prompt, 80)) +
+            br() +
+            br('调度器将在数秒内拾取。'),
+        };
+      }
+      if (t.status === 'blocked') {
+        store.setPendingFeedback(refId, prompt || '请继续');
+        store.setTaskStatus(refId, 'queued');
+        scheduler.tickNow();
+        return { ok: true, message: br(`### ✅ #${refId}(${projectName(t.project_id)}) 已带信息重新入队`) };
+      }
+      return { ok: false, message: `#${refId} 当前 ${t.status}（仅 draft 可执行、blocked 可续跑；想重跑用 \`retry ${refId}\`）` };
+    }
+
+    // ── 形态二：全新任务直接入队 ──
+    if (!all.length) return { ok: false, message: '尚未注册任何项目（先在机器上 desk project add）' };
     if (!projectId) {
       return {
         ok: false,
@@ -128,7 +209,9 @@ export async function applyTaskAction(
       message:
         br('### 🤖 agentdesk 指令') +
         br() +
-        cmd('run <项目> <描述>', '派发新任务（仅一个项目时可省项目名）') +
+        cmd('draft [项目] <描述>', '创建草稿（不会执行；Web 草稿队列也可创建/编辑）') +
+        cmd('run <编号>', '执行草稿/续跑阻塞任务（可附补充文字合入描述）') +
+        cmd('run [项目] <描述>', '全新任务直接入队执行') +
         cmd('resume [编号] <决定>', '阻塞任务带决定续跑（仅一个阻塞任务时可省编号）') +
         cmd('retry <编号>', '重新执行该任务') +
         cmd('cancel <编号>', '取消任务') +
