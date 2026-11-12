@@ -14,10 +14,13 @@ export class Store {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, 'agentdesk.db'));
     this.db.exec('PRAGMA journal_mode = WAL;');
-    // 轻量迁移：老库补 extra_packages 列
+    // 轻量迁移：老库补 extra_packages / mcp_servers 列
     const cols = (this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map(c => c.name);
     if (!cols.includes('extra_packages')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN extra_packages TEXT');
+    }
+    if (!cols.includes('mcp_servers')) {
+      this.db.exec('ALTER TABLE projects ADD COLUMN mcp_servers TEXT');
     }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects(
@@ -26,6 +29,7 @@ export class Store {
         workspace_path TEXT NOT NULL,
         agent_id TEXT NOT NULL DEFAULT 'codex',
         extra_packages TEXT,
+        mcp_servers TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS tasks(
