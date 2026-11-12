@@ -17,7 +17,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     private clientId: string,
     private clientSecret: string,
     private publicUrl: string,
-    private events: string[] = ['blocked', 'failed'],
+    private events: string[] = ['blocked', 'failed', 'succeeded'],
   ) {
     super(30 * 60 * 1000);
   }
