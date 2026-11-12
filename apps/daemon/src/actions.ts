@@ -69,6 +69,17 @@ export async function applyTaskAction(
     return { ok: true, message: md };
   }
 
+  if (action.type === 'projects') {
+    const all = store.listProjects();
+    if (!all.length) return { ok: true, message: br('📭 尚未注册任何项目') + br() + br('机器上：`desk project add <名> <路径>`') };
+    let md = br(`### 📁 项目（${all.length}）`);
+    for (const p of all) {
+      md += br(`- **${p.name}** \`${p.workspace_path}\`${p.agent_id !== 'codex' ? ' · agent: ' + p.agent_id : ''}`);
+    }
+    md += br() + br('> 派任务：`run <项目名> <描述>`');
+    return { ok: true, message: md };
+  }
+
   if (action.type === 'detail') {
     // 详情列表：两行式（编号行 + 描述行）。实测钉钉手机一行约可容纳 24-26 个
     // 中文字符（#15 的 20 字完整显示），故描述限 40 字——绝大多数完整，超长才截。
@@ -217,6 +228,7 @@ export async function applyTaskAction(
         cmd('cancel <编号>', '取消任务') +
         cmd('status', '队列摘要') +
         cmd('详情', '完整任务列表（含所属项目）') +
+        cmd('项目', '所有已注册项目') +
         br() +
         br('💡 编号即归属：任务编号绑定其项目，`status`/`详情` 的每行都会显示所属项目，' +
            '多项目并行时按编号操作即可精准定位。中英文均可（派任务/继续/重试/取消/状态）。' +

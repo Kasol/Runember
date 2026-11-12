@@ -31,6 +31,7 @@ function parseCommand(raw: string, store?: unknown): FeedbackAction {
   const s = raw.trim().replace(/^@\S+\s*/, '');
   if (/^(status|状态|队列)$/i.test(s)) return { type: 'status' };
   if (/^(detail|详情|明细|列表)$/i.test(s)) return { type: 'detail' };
+  if (/^(projects|项目|项目列表)$/i.test(s)) return { type: 'projects' };
   if (/^(help|帮助|\?|？)$/i.test(s)) return { type: 'help' };
   // draft 建草稿（不执行）；run/执行 是"执行动作"（把草稿/新描述转正入队）
   if (/^(draft|草稿)\s/i.test(s)) return { type: 'draft', prompt: s.replace(/^(?:draft|草稿)\s+/i, '') };

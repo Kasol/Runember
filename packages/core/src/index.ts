@@ -211,7 +211,7 @@ export interface ExecutionBackend {
 
 /** 人从远端（IM/网页/…）发回的指令 */
 export interface FeedbackAction {
-  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run' | 'draft';
+  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run' | 'draft' | 'projects';
   taskId?: number;
   feedback?: string;
   /** run/draft 指令：任务描述（或纯数字 = 引用已有任务编号）与目标项目 */
