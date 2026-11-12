@@ -46,6 +46,9 @@ export async function applyTaskAction(
   scheduler: Scheduler,
   action: FeedbackAction,
 ): Promise<{ ok: boolean; message: string }> {
+  /** 项目名速查（多项目并行时每条消息必须可辨识归属） */
+  const projectName = (id: number) => store.getProject(id)?.name ?? `项目#${id}`;
+
   if (action.type === 'status') {
     // 摘要卡片：钉钉群聊气泡对 markdown 渲染有 ~12 行折叠限制，超长必截断。
     // 所以 status 只给 ≤8 行的计数摘要；完整列表走「详情」指令按需拉取。
@@ -56,11 +59,13 @@ export async function applyTaskAction(
 
     let md = br('### 📋 agentdesk 队列');
     if (blocked.length) {
-      md += br(`⚠️ **阻塞 ${blocked.length}**：` + blocked.map(t => `#${t.id}`).join('、'));
+      // 多项目：阻塞行带项目名（如 "#16(web-cad)"），批复时可精准定位
+      md += br(`⚠️ **阻塞 ${blocked.length}**：` +
+        blocked.map(t => `#${t.id}(${projectName(t.project_id)})`).join('、'));
     }
     md += br(`🔄 ${running.length ? '进行中 ' + running.length : '空闲'}` +
       (done ? ` · 已完成 ${done}` : ''));
-    if (blocked.length) md += br('> 回复 `resume <决定>` 续跑 · `详情` 看完整列表');
+    if (blocked.length) md += br('> 回复 `resume <id> <决定>` 续跑 · `详情` 看完整列表');
     return { ok: true, message: md };
   }
 
@@ -70,7 +75,7 @@ export async function applyTaskAction(
     const all = store.listTasks().slice(0, 6);
     let md = br('### 📋 任务列表（最新 6 条）');
     for (const t of all) {
-      md += br() + br(`${badge(t.status)} **#${t.id}**`);
+      md += br() + br(`${badge(t.status)} **#${t.id}** \`${projectName(t.project_id)}\``);
       md += br(`　${cut(t.prompt, 40)}`);
     }
     md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
@@ -147,7 +152,9 @@ export async function applyTaskAction(
         if (blocked.length === 0) return { ok: false, message: '当前没有阻塞任务（发 status 查看队列）' };
         if (blocked.length > 1) {
           let md = br('**当前有多个阻塞任务，请带编号：**') + br();
-          for (const t of blocked) md += br(`- **#${t.id}** ${cut(t.prompt, 30)} → \`resume ${t.id} <决定>\``);
+          for (const t of blocked) {
+            md += br(`- **#${t.id}**(${projectName(t.project_id)}) ${cut(t.prompt, 30)} → \`resume ${t.id} <决定>\``);
+          }
           return { ok: false, message: md };
         }
         rid = blocked[0]!.id;
@@ -167,7 +174,7 @@ export async function applyTaskAction(
       scheduler.tickNow();
       return {
         ok: true,
-        message: br(`### ✅ #${rid} 已带决定续跑`) +
+        message: br(`### ✅ #${rid}(${projectName(task.project_id)}) 已带决定续跑`) +
           br() +
           br(`> ${cut(action.feedback ?? '请继续', 60)}`) +
           br('同一会话上下文，调度器将在数秒内拾取。'),
@@ -179,13 +186,13 @@ export async function applyTaskAction(
       store.setPendingFeedback(id, null);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return { ok: true, message: br(`### 🔁 #${id} 已重新入队`) + br() + br('将作为全新执行开始。') };
+      return { ok: true, message: br(`### 🔁 #${id}(${projectName(task.project_id)}) 已重新入队`) + br() + br('将作为全新执行开始。') };
     }
     case 'cancel': {
       if (!task) return { ok: false, message: `任务 #${id} 不存在` };
       if (task.status === 'running') return { ok: false, message: `#${id} 正在运行，暂不支持在线取消（M2）` };
       store.setTaskStatus(id, 'cancelled');
-      return { ok: true, message: br(`### 🚫 #${id} 已取消`) };
+      return { ok: true, message: br(`### 🚫 #${id}(${projectName(task.project_id)}) 已取消`) };
     }
   }
 }
