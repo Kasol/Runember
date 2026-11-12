@@ -65,11 +65,16 @@ export async function applyTaskAction(
   }
 
   if (action.type === 'detail') {
-    // 完整列表（仍受钉钉折叠限制，倒序取最新的）
-    const all = store.listTasks().slice(0, 10);
-    let md = br('### 📋 完整任务列表（最新 10 条）');
-    for (const t of all) md += br(`- ${badge(t.status)} **#${t.id}** ${cut(t.prompt, 28)}`);
-    md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>`');
+    // 详情列表：钉钉手机屏一行约 20-24 字符，"徽章+编号+长描述"挤一行必截断。
+    // 改为两行式：短行（徽章+编号+项目）+ 独立描述行（≤22字），任何屏幕完整显示。
+    // 只取 6 条（6×3行=18 行，仍在折叠预算内）。
+    const all = store.listTasks().slice(0, 6);
+    let md = br('### 📋 任务列表（最新 6 条）');
+    for (const t of all) {
+      md += br() + br(`${badge(t.status)} **#${t.id}**`);
+      md += br(`　${cut(t.prompt, 22)}`);
+    }
+    md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
     return { ok: true, message: md };
   }
 
