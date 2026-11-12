@@ -66,9 +66,10 @@ export class DingTalkStreamChannel implements FeedbackChannel {
     // 顺带清理 10 分钟前的旧 id，防集合无限增长
     const now = Date.now();
     for (const [k, t] of this.seenMessages) if (now - t > 600_000) this.seenMessages.delete(k);
-    if (this.seenMessages.has(messageId)) return true;
+    const seen = this.seenMessages.has(messageId);
     this.seenMessages.set(messageId, now);
-    return false;
+    console.log(`🔒 [dedup] mid=${messageId.slice(0, 20)} seen=${seen} mapSize=${this.seenMessages.size}`);
+    return seen;
   }
 
   async start(
@@ -77,6 +78,13 @@ export class DingTalkStreamChannel implements FeedbackChannel {
     const client = new DWClient({
       clientId: this.cfg.clientId,
       clientSecret: this.cfg.clientSecret,
+    });
+
+    // ACK 补偿：registerCallbackListener 走 EventEmitter，async 监听器的返回值不会
+    // 被回传给钉钉（SDK 只把 registerAllEventListener 的【同步】返回值作为 ACK 发出）。
+    // 不 ACK → 钉钉认为投递失败 → 60 秒整重推（实测证据：10:40:58.691 → 10:41:58.695）。
+    client.registerAllEventListener((message: any) => {
+      return { status: EventAck.SUCCESS, message: 'OK' };
     });
 
     client.registerCallbackListener(TOPIC_ROBOT, async (res: any) => {
