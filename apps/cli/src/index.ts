@@ -105,6 +105,12 @@ async function main(): Promise<void> {
       }
       process.exit(r.results.every((x: any) => x.ok) ? 0 : 1);
     }
+    case 'doctor': {
+      // 直接本地体检（不依赖 daemon）：git/镜像/凭证/skills
+      const { runDoctor, printDoctor } = await import('../../daemon/src/doctor.js');
+      const code = printDoctor(await runDoctor());
+      process.exit(code);
+    }
     case 'auth': {
       const agent_id = rest[0] ?? 'codex';
       const r = await api('POST', '/api/auth/login', { agent_id });
@@ -115,8 +121,9 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.log('agentdesk CLI —— 命令: project add | run | status | resume | retry | cancel | auth');
-      console.log('  例: npm run desk -- project add demo D:/work/demo');
+      console.log('agentdesk CLI —— 命令: project add | run | status | resume | retry | cancel | auth | doctor | notify-test');
+      console.log('  例: npm run desk -- doctor       # 环境自检');
+      console.log('      npm run desk -- project add demo D:/work/demo');
       console.log('      npm run desk -- run demo "给 README 加一节安装说明"');
   }
 }

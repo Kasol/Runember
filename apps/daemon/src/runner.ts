@@ -14,6 +14,7 @@ import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/cor
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
 import { renderMcpToml, writeMcpToVolume } from './mcp.js';
+import { runNative } from './native.js';
 import type { Task, Project, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -166,6 +167,19 @@ export class Runner {
     console.log(`📦 项目依赖镜像就绪: ${target} (${packages.join(', ')})`);
     return target;
   }
+  /** Native 路径：codex 直接跑宿主（无容器）。与 Docker 路径产出同构的 SpawnResult */
+  private async runNativePath(opts: {
+    adapterImage: string; cmd: string[]; cwd: string; env: string[];
+    timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+  }): Promise<{ exitCode: number; killed: boolean; out: string[]; err: string[] }> {
+    // 宿主命令映射：容器内是 'codex ...'，宿主 PATH 上也是 codex（CLI 原生安装）
+    const cmd = opts.cmd[0] === 'codex' ? ['codex', ...opts.cmd.slice(1)] : opts.cmd;
+    return runNative({
+      cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
+      onStdoutLine: opts.onStdoutLine,
+    });
+  }
+
   async execute(taskId: number): Promise<void> {
     const { cfg, store, events } = this.deps;
     const task = store.getTask(taskId)!;
@@ -235,15 +249,24 @@ export class Runner {
 
       let sessionId: string | undefined;
       let lastAgentText = '';
-      const main = await this.spawn({
+      const isNative = (project as any).execution === 'native';
+      const onLine = (line: string) => {
+        appendFileSync(logPath, line + '\n');
+        const ev = adapter.parseLine(line);
+        if (!ev) return;
+        if (ev.type === 'session' && ev.sessionId && !sessionId) sessionId = ev.sessionId;
+        if (ev.type === 'agent_message' && ev.text) lastAgentText = ev.text;
+      };
+      const main = isNative
+        ? await this.runNativePath({
+            adapterImage: adapter.image, cmd,
+            cwd: project.workspace_path, env,
+            timeoutMs: tmo, tag: `run-${run.id}`,
+            onStdoutLine: onLine,
+          })
+        : await this.spawn({
         image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
-        onStdoutLine: (line) => {
-          appendFileSync(logPath, line + '\n');
-          const ev = adapter.parseLine(line);
-          if (!ev) return;
-          if (ev.type === 'session' && ev.sessionId && !sessionId) sessionId = ev.sessionId;
-          if (ev.type === 'agent_message' && ev.text) lastAgentText = ev.text;
-        },
+        onStdoutLine: onLine,
       });
       for (const l of main.err) appendFileSync(logPath, '[stderr] ' + l + '\n');
       if (sessionId) store.updateRun(run.id, { session_id: sessionId });

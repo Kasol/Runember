@@ -37,6 +37,8 @@ export interface Project {
   /** host-dir 模式：宿主机上的项目绝对路径（bind mount 源） */
   workspace_path: string;
   agent_id: AgentId;
+  /** 执行后端：docker（默认，隔离）| native（codex 直接跑宿主，原生速度/零播种） */
+  execution?: 'docker' | 'native';
   /** 项目级系统依赖声明（依赖三层通道：宿主 daemon 预装进项目专属镜像） */
   extraPackages?: string[];
   /** 项目声明的 MCP server 名（daemon 渲染进容器 config.toml，agent 会话内可用） */
