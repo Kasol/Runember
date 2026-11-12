@@ -2,7 +2,8 @@
  * agentdesk daemon 入口。
  * 启动: npm run daemon [-- --data-dir ./data/agentdesk --port 8787 --config path]
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import Docker from 'dockerode';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
@@ -33,6 +34,28 @@ async function main(): Promise<void> {
     dataDir: arg('--data-dir'),
     port: arg('--port') ? Number(arg('--port')) : undefined,
   });
+
+  // 单实例锁：多个 daemon 并存时各自持有一条钉钉 Stream 连接，
+  // 钉钉把消息推给每条连接 → 指令重复执行/双回复。锁文件在 dataDir 下。
+  const lockPath = join(cfg.dataDir, 'daemon.lock');
+  if (existsSync(lockPath)) {
+    try {
+      const { pid, startedAt } = JSON.parse(readFileSync(lockPath, 'utf8'));
+      let alive = false;
+      try { process.kill(pid, 0); alive = true; } catch { /* 死进程 */ }
+      if (alive) {
+        console.error(`❌ 检测到已有 daemon 实例在运行（PID ${pid}，启动于 ${startedAt}）。`);
+        console.error('   多实例并存会导致钉钉重复回复/指令重复执行。');
+        console.error(`   如确认是僵尸锁：删除 ${lockPath} 后重试。`);
+        process.exit(1);
+      }
+      console.log('（发现过期锁文件，已忽略）');
+    } catch { /* 损坏的锁文件，直接覆盖 */ }
+  }
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  const unlock = () => { try { unlinkSync(lockPath); } catch { /* noop */ } };
+  process.on('exit', unlock);
+
   console.log(`agentdesk daemon 启动中…`);
   console.log(`  dataDir=${cfg.dataDir}  并发=${cfg.scheduler.concurrency}  超时=${cfg.scheduler.taskTimeoutMin}min`);
   if (cfg.proxy.httpsProxy) console.log(`  容器代理=${cfg.proxy.httpsProxy}`);
@@ -72,6 +95,7 @@ async function main(): Promise<void> {
     console.log('\n👋 优雅停机…');
     scheduler.stop();
     feedbackChannel?.stop?.();
+    unlock();
     await app.close();
     process.exit(0);
   };

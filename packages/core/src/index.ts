@@ -11,6 +11,7 @@
 export type AgentId = string;
 
 export type TaskStatus =
+  | 'draft'       // 草稿：Web 派发后可编辑/排序，点「执行」才入队
   | 'queued'      // 已入队等待调度
   | 'running'     // 有 Run 正在执行
   | 'blocked'     // 等人（审批/凭证/额度/超时）

@@ -1,6 +1,6 @@
 /** 前端共享类型与 API 客户端（与 daemon REST 一一对应） */
 
-export type TaskStatus = 'queued' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
+export type TaskStatus = 'draft' | 'queued' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
 
 export interface Project {
   id: number; name: string; workspace_path: string;
@@ -8,7 +8,8 @@ export interface Project {
 }
 export interface Task {
   id: number; project_id: number; prompt: string;
-  status: TaskStatus; pending_feedback: string | null; created_at: string;
+  status: TaskStatus; pending_feedback: string | null;
+  draft_order?: number | null; created_at: string;
 }
 export interface Run {
   id: number; task_id: number; kind: 'normal' | 'resume';
@@ -33,8 +34,11 @@ export const client = {
   tasks: () => api<{ tasks: Task[] }>('GET', '/api/tasks'),
   task: (id: number) => api<{ task: Task; runs: Run[] }>('GET', `/api/tasks/${id}`),
   run: (id: number) => api<{ run: Run; logTail: string[] }>('GET', `/api/runs/${id}`),
-  createTask: (project: string | number, prompt: string) =>
-    api<{ task: Task }>('POST', '/api/tasks', { project, prompt }),
+  createTask: (project: string | number, prompt: string, draft = false) =>
+    api<{ task: Task }>('POST', '/api/tasks', { project, prompt, draft }),
+  drafts: () => api<{ drafts: Task[] }>('GET', '/api/drafts'),
+  draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
+    api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
   createProject: (name: string, workspace_path: string, agent_id = 'codex') =>
     api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id }),
   action: (id: number, type: string, feedback?: string) =>
@@ -42,6 +46,7 @@ export const client = {
 };
 
 export const STATUS_META: Record<TaskStatus, { label: string; color: string; bg: string }> = {
+  draft:    { label: '📝 草稿',   color: '#57606a', bg: '#eef0f2' },
   queued:   { label: '🕐 排队',   color: '#8a6d00', bg: '#fff6d9' },
   running:  { label: '🔄 运行中', color: '#0b62d6', bg: '#e3f0ff' },
   blocked:  { label: '⚠️ 阻塞',   color: '#ad5f00', bg: '#ffeccd' },

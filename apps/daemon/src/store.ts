@@ -14,13 +14,17 @@ export class Store {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, 'agentdesk.db'));
     this.db.exec('PRAGMA journal_mode = WAL;');
-    // 轻量迁移：老库补 extra_packages / mcp_servers 列
+    // 轻量迁移：老库补 extra_packages / mcp_servers / draft_order 列
     const cols = (this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map(c => c.name);
     if (!cols.includes('extra_packages')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN extra_packages TEXT');
     }
     if (!cols.includes('mcp_servers')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN mcp_servers TEXT');
+    }
+    const tcols = (this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(c => c.name);
+    if (!tcols.includes('draft_order')) {
+      this.db.exec('ALTER TABLE tasks ADD COLUMN draft_order INTEGER');
     }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects(
@@ -38,6 +42,7 @@ export class Store {
         prompt TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued',
         pending_feedback TEXT,
+        draft_order INTEGER,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS runs(
@@ -86,10 +91,19 @@ export class Store {
   }
 
   // ── tasks ──
-  addTask(projectId: number, prompt: string): Task {
+  /** draft=true 时任务以 draft 状态落库（不参与调度），draft_order 用于草稿排序 */
+  addTask(projectId: number, prompt: string, opts?: { draft?: boolean }): Task {
+    const status = opts?.draft ? 'draft' : 'queued';
+    let draftOrder: number | null = null;
+    if (opts?.draft) {
+      const row = this.db.prepare(
+        "SELECT MAX(draft_order) AS m FROM tasks WHERE status='draft'",
+      ).get() as { m: number | null };
+      draftOrder = (row?.m ?? 0) + 1;
+    }
     const r = this.db.prepare(
-      'INSERT INTO tasks(project_id, prompt, status, created_at) VALUES (?,?,?,?)',
-    ).run(projectId, prompt, 'queued', new Date().toISOString());
+      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at) VALUES (?,?,?,?,?)',
+    ).run(projectId, prompt, status, draftOrder, new Date().toISOString());
     return this.getTask(Number(r.lastInsertRowid))!;
   }
   getTask(id: number): Task | undefined {
@@ -102,6 +116,28 @@ export class Store {
   }
   setTaskStatus(id: number, status: TaskStatus): void {
     this.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(status, id);
+    if (status !== 'draft') this.db.prepare('UPDATE tasks SET draft_order=NULL WHERE id=?').run(id);
+  }
+
+  /** 草稿操作：编辑提示词 / 移动顺序 */
+  updateTaskPrompt(id: number, prompt: string): void {
+    this.db.prepare('UPDATE tasks SET prompt=? WHERE id=?').run(prompt, id);
+  }
+  reorderDraft(id: number, beforeId: number | null): void {
+    // 把 id 移到 beforeId 之前：重排剩余草稿的 draft_order
+    const drafts = this.db.prepare(
+      "SELECT id FROM tasks WHERE status='draft' ORDER BY draft_order, id",
+    ).all() as Array<{ id: number }>;
+    const list = drafts.map(d => d.id).filter(x => x !== id);
+    const idx = beforeId ? list.indexOf(beforeId) : -1;
+    if (idx >= 0) list.splice(idx, 0, id); else list.push(id);
+    const upd = this.db.prepare('UPDATE tasks SET draft_order=? WHERE id=?');
+    list.forEach((tid, i) => upd.run(i + 1, tid));
+  }
+  listDrafts(): Task[] {
+    return this.db.prepare(
+      "SELECT * FROM tasks WHERE status='draft' ORDER BY draft_order, id",
+    ).all() as unknown as Task[];
   }
   setPendingFeedback(id: number, feedback: string | null): void {
     this.db.prepare('UPDATE tasks SET pending_feedback=? WHERE id=?').run(feedback, id);

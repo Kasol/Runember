@@ -5,14 +5,16 @@ import { client, STATUS_META, type Project, type Task, type Run } from './api';
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [drafts, setDrafts] = useState<Task[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState('');
 
   const refresh = async () => {
     try {
-      const [p, t] = await Promise.all([client.projects(), client.tasks()]);
+      const [p, t, dr] = await Promise.all([client.projects(), client.tasks(), client.drafts()]);
       setProjects(p.projects);
       setTasks(t.tasks);
+      setDrafts(dr.drafts);
       setError('');
     } catch (e: any) { setError(e?.message ?? '无法连接 daemon'); }
   };
@@ -21,6 +23,14 @@ export default function App() {
     void refresh();
     const timer = setInterval(() => void refresh(), 3000);
     return () => clearInterval(timer);
+  }, []);
+
+  // 深链支持：?task=<id>（钉钉通知的"打开任务详情"链接）
+  useEffect(() => {
+    const id = Number(new URLSearchParams(location.search).get('task'));
+    if (id) {
+      void client.task(id).then(d => setSelected(d.task)).catch(() => {});
+    }
   }, []);
 
   const projectName = useMemo(
@@ -39,6 +49,13 @@ export default function App() {
     } catch (e: any) { alert(e?.message ?? '操作失败'); }
   };
 
+  const draftOp = async (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) => {
+    try {
+      await client.draftOp(id, op, extra);
+      await refresh();
+    } catch (e: any) { alert(e?.message ?? '操作失败'); }
+  };
+
   return (
     <div className="app">
       <header>
@@ -50,6 +67,16 @@ export default function App() {
         <NewTask projects={projects} onCreated={() => void refresh()} />
         <AddProject onCreated={() => void refresh()} hasAny={projects.length > 0} />
       </div>
+
+      <DraftQueue
+        drafts={drafts}
+        projects={projects}
+        onOp={draftOp}
+        onDelete={async (id) => { try { await client.action(id, 'cancel'); await refresh(); } catch (e: any) { alert(e?.message ?? '删除失败'); } }}
+        onCreated={() => void refresh()}
+      />
+
+      {error && <div className="banner">{error}</div>}
 
       {error && <div className="banner">{error}</div>}
 
@@ -234,6 +261,67 @@ function AddProject(props: { onCreated: () => void; hasAny: boolean }) {
   );
 }
 
+/** 草稿队列：入队后不执行；可编辑/排序；点「执行」才真实入队调度 */
+function DraftQueue(props: {
+  drafts: Task[];
+  projects: Project[];
+  onOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  onCreated: () => void;
+}) {
+  const [editing, setEditing] = useState<number | null>(null);
+  const [text, setText] = useState('');
+  const pname = new Map(props.projects.map(p => [p.id, p.name]));
+
+  const move = (t: Task, dir: -1 | 1) => {
+    const idx = props.drafts.findIndex(d => d.id === t.id);
+    const neighbor = props.drafts[idx + dir];
+    // moveBefore 语义：放到 neighbor 之前（上移 = 放到前一个之前；下移 = 放到后一个之后）
+    if (dir === -1) void props.onOp(t.id, 'moveBefore', { beforeId: neighbor?.id ?? null });
+    else void props.onOp(neighbor!.id, 'moveBefore', { beforeId: t.id });
+  };
+
+  const saveEdit = async (t: Task) => {
+    await props.onOp(t.id, 'edit', { prompt: text });
+    setEditing(null);
+  };
+
+  return (
+    <section className="draft-box">
+      <h2>📝 草稿队列（{props.drafts.length}）<span className="dim">—— 入队后不会自动执行，点「执行」才真实入队</span></h2>
+      {!props.drafts.length && <div className="empty">草稿队列为空</div>}
+      {props.drafts.map((t, i) => (
+        <div key={t.id} className="draft-row">
+          {editing === t.id ? (
+            <>
+              <textarea value={text} onChange={e => setText(e.target.value)} rows={2} />
+              <div className="row">
+                <button className="primary" onClick={() => void saveEdit(t)}>保存</button>
+                <button onClick={() => setEditing(null)}>取消</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="draft-idx">{i + 1}.</span>
+              <span className="draft-prompt" onClick={() => { setEditing(t.id); setText(t.prompt); }} title="点击编辑">
+                {t.prompt}
+              </span>
+              <span className="draft-project">{pname.get(t.project_id)}</span>
+              <div className="draft-actions">
+                <button title="上移" disabled={i === 0} onClick={() => move(t, -1)}>↑</button>
+                <button title="下移" disabled={i === props.drafts.length - 1} onClick={() => move(t, 1)}>↓</button>
+                <button title="编辑提示词" onClick={() => { setEditing(t.id); setText(t.prompt); }}>编辑</button>
+                <button className="primary" onClick={() => void props.onOp(t.id, 'enqueue')}>▶ 执行</button>
+                <button title="删除草稿" onClick={() => void props.onDelete(t.id)}>🗑</button>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function NewTask(props: { projects: Project[]; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [project, setProject] = useState('');
@@ -248,7 +336,7 @@ function NewTask(props: { projects: Project[]; onCreated: () => void }) {
     if (!prompt.trim() || busy) return;
     setBusy(true);
     try {
-      await client.createTask(Number(project), prompt.trim());
+      await client.createTask(Number(project), prompt.trim(), true); // 存草稿，不自动执行
       setPrompt('');
       setOpen(false);
       props.onCreated();
@@ -257,7 +345,7 @@ function NewTask(props: { projects: Project[]; onCreated: () => void }) {
   };
 
   if (!open) {
-    return <button className="new-task" onClick={() => setOpen(true)}>＋ 派发任务</button>;
+    return <button className="new-task" onClick={() => setOpen(true)}>＋ 新建任务（存草稿）</button>;
   }
   return (
     <div className="new-task-box">
@@ -265,7 +353,7 @@ function NewTask(props: { projects: Project[]; onCreated: () => void }) {
         {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
       <textarea
-        placeholder="描述任务，如：重构 utils 目录并补全单元测试"
+        placeholder="描述任务，如：重构 utils 目录并补全单元测试（保存后进入草稿队列，点「执行」才运行）"
         value={prompt} onChange={e => setPrompt(e.target.value)} rows={3}
       />
       <div className="row">

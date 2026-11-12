@@ -80,17 +80,41 @@ export function buildServer(deps: {
   app.get<{ Querystring: { status?: TaskStatus } }>('/api/tasks', async (req) =>
     ({ tasks: store.listTasks(req.query?.status) }));
 
-  app.post<{ Body: { project: string | number; prompt: string } }>(
+  app.post<{ Body: { project: string | number; prompt: string; draft?: boolean } }>(
     '/api/tasks', async (req, reply) => {
-      const { project, prompt } = req.body ?? ({} as any);
+      const { project, prompt, draft } = req.body ?? ({} as any);
       if (!project || !prompt) return reply.code(400).send({ error: 'project 与 prompt 必填' });
       const p = typeof project === 'number'
         ? store.getProject(project)
         : store.findProject(project);
       if (!p) return reply.code(404).send({ error: `项目不存在: ${project}` });
-      return reply.code(201).send({ task: store.addTask(p.id, prompt) });
+      return reply.code(201).send({ task: store.addTask(p.id, prompt, { draft: !!draft }) });
     },
   );
+
+  /** 草稿操作：编辑 / 排序（移到某任务之前）/ 入队执行 */
+  app.post<{ Params: { id: string }; Body: { op: 'edit' | 'moveBefore' | 'enqueue'; prompt?: string; beforeId?: number } }>(
+    '/api/tasks/:id/draft', async (req, reply) => {
+      const t = store.getTask(Number(req.params.id));
+      if (!t) return reply.code(404).send({ error: 'not found' });
+      if (t.status !== 'draft') return reply.code(409).send({ error: '仅 draft 任务可操作' });
+      const { op, prompt, beforeId } = req.body ?? ({} as any);
+      if (op === 'edit') {
+        if (!prompt?.trim()) return reply.code(400).send({ error: 'prompt 不能为空' });
+        store.updateTaskPrompt(t.id, prompt.trim());
+      } else if (op === 'moveBefore') {
+        store.reorderDraft(t.id, beforeId ?? null);
+      } else if (op === 'enqueue') {
+        store.setTaskStatus(t.id, 'queued');
+        scheduler.tickNow();
+      } else {
+        return reply.code(400).send({ error: 'op 必须是 edit|moveBefore|enqueue' });
+      }
+      return { ok: true, task: store.getTask(t.id) };
+    },
+  );
+
+  app.get('/api/drafts', async () => ({ drafts: store.listDrafts() }));
 
   app.get<{ Params: { id: string } }>('/api/tasks/:id', async (req, reply) => {
     const t = store.getTask(Number(req.params.id));
