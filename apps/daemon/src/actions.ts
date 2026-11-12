@@ -47,24 +47,29 @@ export async function applyTaskAction(
   action: FeedbackAction,
 ): Promise<{ ok: boolean; message: string }> {
   if (action.type === 'status') {
+    // 摘要卡片：钉钉群聊气泡对 markdown 渲染有 ~12 行折叠限制，超长必截断。
+    // 所以 status 只给 ≤8 行的计数摘要；完整列表走「详情」指令按需拉取。
     const all = store.listTasks();
     const blocked = store.listTasks('blocked');
     const running = all.filter(t => t.status === 'running');
-    const recent = all.filter(t => !['running'].includes(t.status)).slice(0, 6);
+    const done = all.filter(t => t.status === 'done').length;
 
     let md = br('### 📋 agentdesk 队列');
     if (blocked.length) {
-      md += br() + br(`**⚠️ 等你决定（${blocked.length}）**`);
-      for (const t of blocked) md += br(`- **#${t.id}** ${cut(t.prompt, 36)}`);
-      md += br('> 回复 `resume <决定>` 即可续跑');
+      md += br(`⚠️ **阻塞 ${blocked.length}**：` + blocked.map(t => `#${t.id}`).join('、'));
     }
-    if (running.length) {
-      md += br() + br(`**🔄 执行中（${running.length}）**`);
-      for (const t of running) md += br(`- **#${t.id}** ${cut(t.prompt, 36)}`);
-    }
-    md += br() + br('**最近任务**');
-    for (const t of recent) md += br(`- ${badge(t.status)} **#${t.id}** ${cut(t.prompt, 30)}`);
-    if (!all.length) md += br('队列为空，`run <项目> "任务"` 挂一个吧');
+    md += br(`🔄 ${running.length ? '进行中 ' + running.length : '空闲'}` +
+      (done ? ` · 已完成 ${done}` : ''));
+    if (blocked.length) md += br('> 回复 `resume <决定>` 续跑 · `详情` 看完整列表');
+    return { ok: true, message: md };
+  }
+
+  if (action.type === 'detail') {
+    // 完整列表（仍受钉钉折叠限制，倒序取最新的）
+    const all = store.listTasks().slice(0, 10);
+    let md = br('### 📋 完整任务列表（最新 10 条）');
+    for (const t of all) md += br(`- ${badge(t.status)} **#${t.id}** ${cut(t.prompt, 28)}`);
+    md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>`');
     return { ok: true, message: md };
   }
 

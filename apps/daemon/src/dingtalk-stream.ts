@@ -30,6 +30,7 @@ interface IncomingMessage {
 function parseCommand(raw: string, store?: unknown): FeedbackAction {
   const s = raw.trim().replace(/^@\S+\s*/, '');
   if (/^(status|状态|队列)$/i.test(s)) return { type: 'status' };
+  if (/^(detail|详情|明细|列表)$/i.test(s)) return { type: 'detail' };
   if (/^(help|帮助|\?|？)$/i.test(s)) return { type: 'help' };
   // run 派单：语法在 applyTaskAction 内解析（需要查询项目表），这里只识别动词
   if (/^(run|派任务|执行)\s/i.test(s)) return { type: 'run', prompt: s.replace(/^(?:run|派任务|执行)\s+/i, '') };
@@ -39,8 +40,16 @@ function parseCommand(raw: string, store?: unknown): FeedbackAction {
   if (m) return { type: 'resume', taskId: m[1] ? Number(m[1]) : undefined, feedback: m[2]!.trim() || '请继续' };
   m = s.match(/^(?:retry|重试)\s*#?(\d+)\s*$/i);
   if (m) return { type: 'retry', taskId: Number(m[1]) };
-  m = s.match(/^(?:cancel|取消|终止)\s*#?(\d+)\s*$/i);
+  m = s.match(/^(?:cancel|取消|终止|不要了|算了)\s*#?(\d+)\s*$/i);
   if (m) return { type: 'cancel', taskId: Number(m[1]) };
+
+  // 自然语序倒装：「16 不要了」「16 取消」「17 继续 xxx」——编号在前的真实用户习惯
+  m = s.match(/^#?(\d+)\s*(?:不要了|算了|取消|终止|cancel)\s*$/i);
+  if (m) return { type: 'cancel', taskId: Number(m[1]) };
+  m = s.match(/^#?(\d+)\s*(?:重试|retry)\s*$/i);
+  if (m) return { type: 'retry', taskId: Number(m[1]) };
+  m = s.match(/^#?(\d+)\s*(?:继续|恢复|resume)\s*[:：,，]?\s*([\s\S]*)$/i);
+  if (m) return { type: 'resume', taskId: Number(m[1]), feedback: m[2]!.trim() || '请继续' };
   return { type: 'help' };
 }
 
