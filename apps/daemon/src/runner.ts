@@ -205,7 +205,7 @@ export class Runner {
     try {
       // ① 播种宿主 skills（若有）→ MCP 声明渲染 → 项目级依赖预装 → 凭证自检
       await this.seedSkills(adapter.homeVolume);
-      const mcp = (project as any).mcpServers as string[] | undefined;
+      const mcp = project.mcpServers;
       if (mcp?.length) {
         const registry = (cfg.agents[project.agent_id] as any)?.mcp ?? {};
         const { toml, written, skipped } = renderMcpToml(mcp, registry);
@@ -215,7 +215,7 @@ export class Runner {
         }
         if (written.length) console.log(`🔌 MCP 已注入容器配置: ${written.join(', ')}`);
       }
-      const extra = (project as any).extraPackages as string[] | undefined;
+      const extra = project.extraPackages;
       if (extra?.length) {
         // 项目专属镜像替代基础镜像执行本次 run（依赖内置于镜像，容器销毁不丢失）
         const image = await this.installPackages(adapter.image, extra, project.id);
@@ -249,7 +249,7 @@ export class Runner {
 
       let sessionId: string | undefined;
       let lastAgentText = '';
-      const isNative = (project as any).execution === 'native';
+      const isNative = project.execution === 'native';
       const onLine = (line: string) => {
         appendFileSync(logPath, line + '\n');
         const ev = adapter.parseLine(line);
@@ -265,9 +265,9 @@ export class Runner {
             onStdoutLine: onLine,
           })
         : await this.spawn({
-        image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
-        onStdoutLine: onLine,
-      });
+            image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
+            onStdoutLine: onLine,
+          });
       for (const l of main.err) appendFileSync(logPath, '[stderr] ' + l + '\n');
       if (sessionId) store.updateRun(run.id, { session_id: sessionId });
 

@@ -64,13 +64,25 @@ export class Store {
     return this.getProject(Number(r.lastInsertRowid))!;
   }
   getProject(id: number): Project | undefined {
-    return this.db.prepare('SELECT * FROM projects WHERE id=?').get(id) as Project | undefined;
+    const row = this.db.prepare('SELECT * FROM projects WHERE id=?').get(id) as any;
+    if (!row) return undefined;
+    return this.parseProject(row);
   }
   findProject(name: string): Project | undefined {
-    return this.db.prepare('SELECT * FROM projects WHERE name=?').get(name) as Project | undefined;
+    const row = this.db.prepare('SELECT * FROM projects WHERE name=?').get(name) as any;
+    return row ? this.parseProject(row) : undefined;
   }
   listProjects(): Project[] {
-    return this.db.prepare('SELECT * FROM projects ORDER BY id').all() as unknown as Project[];
+    return (this.db.prepare('SELECT * FROM projects ORDER BY id').all() as any[]).map(r => this.parseProject(r));
+  }
+
+  /** JSON 列（extra_packages/mcp_servers）解析：TEXT → 数组 */
+  private parseProject(row: any): Project {
+    const parse = (v: unknown): string[] | undefined => {
+      if (typeof v !== 'string' || !v) return undefined;
+      try { const a = JSON.parse(v); return Array.isArray(a) ? a : undefined; } catch { return undefined; }
+    };
+    return { ...row, extraPackages: parse(row.extra_packages), mcpServers: parse(row.mcp_servers) } as Project;
   }
 
   // ── tasks ──
