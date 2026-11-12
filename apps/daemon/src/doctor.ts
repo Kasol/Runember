@@ -2,10 +2,11 @@
  * doctor —— 开箱自检：五项环境依赖一键体检。
  * 用法: npm run desk -- doctor
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { hostGitAvailable } from '../../daemon/src/hostgit.js';
+import { execFile } from 'node:child_process';
+import { hostGitAvailable } from './hostgit.js';
 
 export interface DoctorRow { name: string; ok: boolean; detail: string; required: boolean }
 
@@ -34,7 +35,6 @@ export async function runDoctor(): Promise<DoctorRow[]> {
   });
 
   await check('Runner 镜像 (agentdesk/runner-codex:m0)', true, async () => {
-    const { execFile } = await import('node:child_process');
     const p = promisifyExec(execFile);
     try {
       await p('docker', ['image', 'inspect', 'agentdesk/runner-codex:m0'], { timeout: 8000 });
@@ -45,7 +45,6 @@ export async function runDoctor(): Promise<DoctorRow[]> {
   });
 
   await check('Codex 凭证（codex-home 卷）', true, async () => {
-    const { execFile } = await import('node:child_process');
     const p = promisifyExec(execFile);
     try {
       await p('docker', ['run', '--rm', '-v', 'agentdesk-codex-home:/h', 'alpine:latest', 'sh', '-c', 'test -f /h/auth.json'], { timeout: 20000 });
@@ -58,7 +57,7 @@ export async function runDoctor(): Promise<DoctorRow[]> {
   await check('宿主 skills 目录（可选继承）', false, async () => {
     const dir = join(homedir(), '.codex', 'skills');
     if (!existsSync(dir)) return { ok: true, detail: '不存在（无 skills 可继承，非问题）' };
-    const n = existsSync(dir) ? require('node:fs').readdirSync(dir).length : 0;
+    const n = readdirSync(dir).length;
     return { ok: true, detail: `${n} 个 skills 将在每次任务前播种进容器` };
   });
 
