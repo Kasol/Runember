@@ -122,7 +122,27 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 - [x] M1 核心循环：monorepo + SQLite 队列 + 调度器 + host-dir 执行 + CLI（验收通过）
 - [x] M3 钉钉闭环：阻塞推送 + 手机批复续跑（含派单），单机器人双职责，端到端验收通过
 - [x] M2 Web 看板：三栏看板 / 任务详情（总结+日志）/ 页面派发与反馈
-- [ ] M4 cron 计划 + 额度熔断 + 运行中任务插话/取消 + 并发放开
+- [x] M4 环境冲刺：宿主侧 git 安全网 / 依赖三层通道 / MCP 声明 / 循环熔断 / NativeBackend / doctor
+- [ ] M4.5 cron 计划 + 额度熔断 + 运行中任务插话/取消 + 并发放开
+
+## 项目配置进阶（M4）
+
+注册项目（`POST /api/projects`）支持的可选字段：
+
+| 字段 | 说明 |
+|---|---|
+| `execution` | `'docker'`（默认，容器隔离）/ `'native'`（codex 直接跑宿主，原生速度零播种；⚠️ agent 以你的用户身份操作本机） |
+| `extraPackages` | 项目级系统依赖（如 `["resvg"]`）→ daemon 预装进项目专属镜像（`curl` 实战验证） |
+| `mcpServers` | 声明任务需要的 MCP server 名 → 渲染进容器内 codex config.toml（需先在 `~/.agentdesk/config.json` 的 `agents.codex.mcp` 登记地址；未登记的声明会被跳过并告警） |
+
+内建安全机制（自动运行，无需配置）：
+
+- **git 安全网在宿主侧**：checkpoint/审计由 daemon 用宿主 git 执行（继承你的 LFS/filemode 配置），容器不触碰 `.git`
+- **循环熔断**：任务 1 小时内阻塞 ≥3 次，通知升级为"需要人工修复环境"，不再无限循环
+- **契约环境规则**：agent 被告知系统级依赖装不了就精确上报一次（附安装方式），不反复重试
+- **注册时自动配置**：项目仓库自动设 `core.filemode=false`（跨容器权限位噪音根治）；宿主未装 git 拒绝注册并提示
+
+环境自检：`npm run desk -- doctor`（Docker / git / 镜像 / 凭证 / skills 五项）
 
 ## Web 看板使用手册
 
