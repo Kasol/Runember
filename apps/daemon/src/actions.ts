@@ -249,9 +249,13 @@ export async function applyTaskAction(
       if (task.status !== 'blocked') {
         return {
           ok: false,
-          message: br(`${badge(task.status)} **#${rid}** 当前不是阻塞状态，无法 resume`) +
+          message: br(`🚫 **#${rid}** 当前 ${badge(task.status)}，无法执行`) +
             br() +
-            (task.status === 'done' ? br(`想重跑可回复 \`retry ${rid}\``) : ''),
+            (task.status === 'done' || task.status === 'failed'
+              ? br(`想重跑可回复 \`retry ${rid}\``)
+              : task.status === 'cancelled'
+                ? br('已取消的任务如需重跑：`retry ' + rid + '`')
+                : ''),
         };
       }
       store.setPendingFeedback(rid, action.feedback ?? '请继续');
