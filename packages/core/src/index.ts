@@ -37,6 +37,8 @@ export interface Project {
   /** host-dir 模式：宿主机上的项目绝对路径（bind mount 源） */
   workspace_path: string;
   agent_id: AgentId;
+  /** 项目级系统依赖声明（依赖三层通道：宿主 daemon 预装进项目专属镜像） */
+  extraPackages?: string[];
   created_at: string;
 }
 
@@ -82,10 +84,16 @@ export const AGENTCTL_MARKER = '###AGENTCTL_BLOCKED###';
 export const AGENTCTL_CONTRACT = [
   '',
   '---',
-  '[运行平台约定] 如果你在无法获得人类输入的情况下无法继续（缺凭据/需要产品决策/需要确认破坏性操作），',
+  '[运行平台约定]',
+  '1. 如果你在无法获得人类输入的情况下无法继续（缺凭据/需要产品决策/需要确认破坏性操作），',
   `请立即停止并输出一行以 ${AGENTCTL_MARKER} 开头的 JSON，形如：`,
   `${AGENTCTL_MARKER} {"reason":"...","question":"..."}，然后结束。不要猜测，不要空转。`,
-  '其余情况正常完成任务即可。不要执行 git push。',
+  '2. 【环境规则】系统级依赖无法安装（沙箱只允许写工作区）。npm/pip 安装到项目本地目录是允许的；',
+  '系统级缺失（apt/全局包/系统库/外部服务）时：不要反复重试安装，输出阻塞标记，',
+  '并在 question 里精确列出缺失项与宿主侧安装方式（如 "apt-get install resvg" 或 "需预装 X"），一次问清。',
+  '3. 平台未配置的外部工具（MCP/浏览器调试等）不存在，不要请求启用它们；',
+  '若有合理的降级方案（如跳过某类验收），在 question 里给出明确的降级选项供人选择。',
+  '4. 其余情况正常完成任务即可。不要执行 git push。',
 ].join('\n');
 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────

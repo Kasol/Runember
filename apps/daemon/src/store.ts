@@ -14,12 +14,18 @@ export class Store {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, 'agentdesk.db'));
     this.db.exec('PRAGMA journal_mode = WAL;');
+    // 轻量迁移：老库补 extra_packages 列
+    const cols = (this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map(c => c.name);
+    if (!cols.includes('extra_packages')) {
+      this.db.exec('ALTER TABLE projects ADD COLUMN extra_packages TEXT');
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
         workspace_path TEXT NOT NULL,
         agent_id TEXT NOT NULL DEFAULT 'codex',
+        extra_packages TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS tasks(
@@ -47,10 +53,10 @@ export class Store {
   }
 
   // ── projects ──
-  addProject(name: string, workspacePath: string, agentId: string): Project {
+  addProject(name: string, workspacePath: string, agentId: string, extraPackages?: string[]): Project {
     const r = this.db.prepare(
-      'INSERT INTO projects(name, workspace_path, agent_id, created_at) VALUES (?,?,?,?)',
-    ).run(name, workspacePath, agentId, new Date().toISOString());
+      'INSERT INTO projects(name, workspace_path, agent_id, extra_packages, created_at) VALUES (?,?,?,?,?)',
+    ).run(name, workspacePath, agentId, extraPackages?.length ? JSON.stringify(extraPackages) : null, new Date().toISOString());
     return this.getProject(Number(r.lastInsertRowid))!;
   }
   getProject(id: number): Project | undefined {

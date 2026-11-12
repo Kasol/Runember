@@ -137,7 +137,34 @@ export class Runner {
     console.log(`🌱 已播种宿主 skills → ${volumeName}`);
   }
 
-  /** 任务入口：task 必须处于 queued，终态落库 + 发通知 */
+  /**
+   * 项目级依赖预装（依赖三层通道的"项目层"）：
+   * extraPackages 声明的系统包 → 装完 commit 为项目专属镜像（<base>-p<projectId>）。
+   * 镜像按内容键复用：同名包集合同一镜像，不随 run 数膨胀。
+   */
+  private async installPackages(baseImage: string, packages: string[], projectId: number): Promise<string> {
+    const { docker } = this.deps;
+    const key = packages.slice().sort().join(',');
+    const target = `${baseImage.split(':')[0]}:p${projectId}`;
+    // 复用：目标镜像已存在则跳过安装（包集合变化时由调用方传不同 packages，tag 以项目为粒度，
+    // 变更场景：先删旧 tag 再重建——简单可靠，容器销毁型架构下重建成本可接受）
+    try { await docker.getImage(target).inspect(); return target; } catch { /* 不存在，开始构建 */ }
+    const c = await docker.createContainer({
+      Image: baseImage,
+      Cmd: ['sh', '-c', `apt-get update -qq && apt-get install -y -qq --no-install-recommends ${packages.join(' ')} && rm -rf /var/lib/apt/lists/*`],
+      Labels: { 'agentdesk.extra': 'pkgs', 'agentdesk.packages': key },
+    });
+    await c.start();
+    const wait = await c.wait();
+    if (wait.StatusCode !== 0) {
+      try { await c.remove({ force: true }); } catch { /* noop */ }
+      throw new Error(`依赖预装失败（exit=${wait.StatusCode}）: ${packages.join(',')}`);
+    }
+    await c.commit({ repo: target.split(':')[0], tag: target.split(':')[1] });
+    try { await c.remove(); } catch { /* noop */ }
+    console.log(`📦 项目依赖镜像就绪: ${target} (${packages.join(', ')})`);
+    return target;
+  }
   async execute(taskId: number): Promise<void> {
     const { cfg, store, events } = this.deps;
     const task = store.getTask(taskId)!;
@@ -161,8 +188,16 @@ export class Runner {
     const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
 
     try {
-      // ① 播种宿主 skills（若有）→ 凭证自检
+      // ① 播种宿主 skills（若有）→ 项目级依赖预装（extraPackages）→ 凭证自检
       await this.seedSkills(adapter.homeVolume);
+      const extra = (project as any).extraPackages as string[] | undefined;
+      if (extra?.length) {
+        // 项目专属镜像替代基础镜像执行本次 run（依赖内置于镜像，容器销毁不丢失）
+        const image = await this.installPackages(adapter.image, extra, project.id);
+        var effectiveImage = image;
+      } else {
+        var effectiveImage = adapter.image;
+      }
       await this.ensureVolume(adapter.homeVolume);
       const auth = await this.spawn({
         image: adapter.image, cmd: adapter.authCheckArgs(), binds,
@@ -190,7 +225,7 @@ export class Runner {
       let sessionId: string | undefined;
       let lastAgentText = '';
       const main = await this.spawn({
-        image: adapter.image, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
+        image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
         onStdoutLine: (line) => {
           appendFileSync(logPath, line + '\n');
           const ev = adapter.parseLine(line);

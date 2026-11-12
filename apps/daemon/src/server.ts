@@ -52,13 +52,14 @@ export function buildServer(deps: {
 
   // ── projects ──
   app.get('/api/projects', async () => ({ projects: store.listProjects() }));
-  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string } }>(
+  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; extraPackages?: string[] } }>(
     '/api/projects', async (req, reply) => {
-      const { name, workspace_path, agent_id = 'codex' } = req.body ?? ({} as any);
+      const { name, workspace_path, agent_id = 'codex', extraPackages } = req.body ?? ({} as any);
       if (!name || !workspace_path) return reply.code(400).send({ error: 'name 与 workspace_path 必填' });
       if (!availableAgents().includes(agent_id)) return reply.code(400).send({ error: `未知 agent: ${agent_id}` });
       if (store.findProject(name)) return reply.code(409).send({ error: `项目名已存在: ${name}` });
       if (!existsSync(workspace_path)) return reply.code(400).send({ error: `路径不存在: ${workspace_path}` });
+      if (extraPackages && !Array.isArray(extraPackages)) return reply.code(400).send({ error: 'extraPackages 必须是字符串数组' });
 
       // 宿主环境防护：git 可用性 + 仓库级配置自动化（用户零心智负担）
       const gitInfo = await hostGitAvailable();
@@ -67,7 +68,7 @@ export function buildServer(deps: {
       }
       const gitCfg = await setupProjectGit(workspace_path);
 
-      const project = store.addProject(name, workspace_path, agent_id);
+      const project = store.addProject(name, workspace_path, agent_id, extraPackages);
       return reply.code(201).send({
         project,
         git: { version: gitInfo.version, config: gitCfg.message },
