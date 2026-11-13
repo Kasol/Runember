@@ -55,8 +55,25 @@ button.danger:hover { background: #fde8ea; }
 .draft-actions button { padding: 4px 10px; font-size: 12px; }
 .draft-row textarea { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #d0d7de; font: inherit; font-size: 13px; }
 
-.columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: start; }
+.columns { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 1500px) { .columns { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
+
+.proj-strip { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.strip-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.strip-head h2 { font-size: 15px; color: #1f2328; }
+.strip-cards { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.proj-card { min-width: 190px; border: 2px solid #e3e8ee; border-radius: 10px; padding: 10px 12px; cursor: pointer; background: #fafbfc; }
+.proj-card:hover { border-color: #9cc3f5; }
+.proj-card.selected { border-color: #1677ff; background: #f0f7ff; }
+.proj-card.all { border-style: dashed; }
+.proj-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.mini-count { font-size: 11px; color: #0b62d6; background: #e3f0ff; border-radius: 8px; padding: 1px 7px; }
+.proj-card-name { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.proj-card-path { font-size: 11px; color: #9aa4b0; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-card-actions { display: flex; gap: 4px; margin-top: 8px; }
+.proj-card-actions button { padding: 2px 8px; font-size: 11px; }
+.strip-cards .new-task { min-width: 150px; height: auto; align-self: stretch; margin: 0; }
 .col { background: #eceff3; border-radius: 12px; padding: 12px; min-height: 200px; }
 .col h2 { font-size: 14px; color: #57606a; margin-bottom: 10px; }
 .col.tone-warn { background: #fff4e6; }
