@@ -21,6 +21,27 @@ header h1 { font-size: 22px; }
 
 .banner { padding: 10px 14px; background: #fde8ea; color: #c01d2e; border-radius: 8px; margin-bottom: 14px; font-size: 13px; }
 
+.proj-box { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.proj-box h2 { font-size: 14px; color: #456; margin-bottom: 10px; }
+.proj-row { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-bottom: 1px dashed #eef0f2; }
+.proj-row:last-of-type { border-bottom: none; }
+.mode-badge { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; white-space: nowrap; }
+.mode-badge.cap { color: #0b62d6; background: #e3f0ff; }
+.mode-badge.iso { color: #1a7f37; background: #e2f5e8; }
+.proj-info { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.proj-info .dim { font-size: 11.5px; color: #9aa4b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-actions { display: flex; gap: 6px; }
+.proj-actions button { padding: 4px 10px; font-size: 12px; }
+button.danger { color: #c01d2e; border-color: #f2b8bd; }
+button.danger:hover { background: #fde8ea; }
+.recheck-report { margin-top: 10px; background: #f6f8fa; border-radius: 8px; padding: 10px 14px; font-size: 13px; }
+.recheck-report b { display: block; margin-bottom: 6px; }
+.recheck-report .ok { color: #1a7f37; padding: 2px 0; }
+.recheck-report .bad { color: #c01d2e; padding: 2px 0; }
+.recheck-report button { margin-top: 8px; }
+.mode-select { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.mode-select label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
 .draft-box { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .draft-box h2 { font-size: 14px; color: #456; margin-bottom: 10px; }
 .draft-box h2 .dim { font-size: 12px; color: #9aa4b0; font-weight: 400; }

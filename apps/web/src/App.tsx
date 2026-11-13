@@ -78,7 +78,7 @@ export default function App() {
 
       {error && <div className="banner">{error}</div>}
 
-      {error && <div className="banner">{error}</div>}
+      <ProjectList projects={projects} onChanged={() => void refresh()} />
 
       <div className="columns">
         <Column title={`⚠️ 阻塞 (${blocked.length})`} tone="warn"
@@ -213,10 +213,82 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
   );
 }
 
+/** 项目列表：模式徽章 / 切换 / 重新检测 / 删除 */
+function ProjectList(props: { projects: Project[]; onChanged: () => void }) {
+  const [report, setReport] = useState<{ name: string; rows: Array<{ name: string; ok: boolean; detail: string }> } | null>(null);
+  const [busy, setBusy] = useState<number | null>(null);
+
+  const patch = async (id: number, body: Record<string, unknown>) => {
+    setBusy(id);
+    try {
+      await client.updateProject(id, body);
+      props.onChanged();
+    } catch (e: any) { alert(e?.message ?? '操作失败'); }
+    setBusy(null);
+  };
+
+  const recheck = async (p: Project) => {
+    setBusy(p.id);
+    try {
+      const d = await client.recheckProject(p.id);
+      setReport({ name: p.name, rows: d.report });
+    } catch (e: any) { alert(e?.message ?? '检测失败'); }
+    setBusy(null);
+  };
+
+  const remove = async (p: Project) => {
+    if (!confirm(`删除项目「${p.name}」？（不影响任务历史与磁盘文件）`)) return;
+    try { await client.deleteProject(p.id); props.onChanged(); } catch (e: any) { alert(e?.message ?? '删除失败'); }
+  };
+
+  if (!props.projects.length) return null;
+  return (
+    <section className="proj-box">
+      <h2>📁 项目（{props.projects.length}）</h2>
+      {props.projects.map(p => {
+        const mode = p.execution ?? 'capability';
+        const isCap = mode === 'capability';
+        return (
+          <div key={p.id} className="proj-row">
+            <span className={`mode-badge ${isCap ? 'cap' : 'iso'}`}>{isCap ? '⚡ 能力优先' : '🛡 隔离优先'}</span>
+            <div className="proj-info">
+              <b>{p.name}</b>
+              <span className="dim">{p.workspace_path}</span>
+            </div>
+            <div className="proj-actions">
+              <button disabled={busy === p.id} onClick={() => void recheck(p)}>
+                {busy === p.id ? '检测中…' : '🔍 重新检测'}
+              </button>
+              <button
+                disabled={busy === p.id}
+                title={isCap ? '切换到隔离优先（Linux 容器执行；将重新做平台检测）' : '切换到能力优先（宿主原生执行）'}
+                onClick={() => void patch(p.id, { execution: isCap ? 'isolation' : 'capability' })}
+              >
+                {isCap ? '→ 隔离优先' : '→ 能力优先'}
+              </button>
+              <button className="danger" onClick={() => void remove(p)}>删除</button>
+            </div>
+          </div>
+        );
+      })}
+      {report && (
+        <div className="recheck-report">
+          <b>🩺 「{report.name}」检测报告</b>
+          {report.rows.map((r, i) => (
+            <div key={i} className={r.ok ? 'ok' : 'bad'}>{r.ok ? '✅' : '❌'} {r.name} — {r.detail}</div>
+          ))}
+          <button onClick={() => setReport(null)}>关闭</button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AddProject(props: { onCreated: () => void; hasAny: boolean }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
+  const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
@@ -225,7 +297,7 @@ function AddProject(props: { onCreated: () => void; hasAny: boolean }) {
     setBusy(true);
     setMsg('');
     try {
-      await client.createProject(name.trim(), path.trim());
+      await client.createProject(name.trim(), path.trim(), 'codex', execution);
       setName('');
       setPath('');
       setOpen(false);
@@ -249,6 +321,16 @@ function AddProject(props: { onCreated: () => void; hasAny: boolean }) {
           value={path} onChange={e => setPath(e.target.value)}
           style={{ flex: 2 }}
         />
+      </div>
+      <div className="mode-select">
+        <label>
+          <input type="radio" checked={execution === 'capability'} onChange={() => setExecution('capability')} />
+          ⚡ 能力优先（默认）— codex 直接跑宿主，原生依赖可用
+        </label>
+        <label>
+          <input type="radio" checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
+          🛡 隔离优先 — Linux 容器执行（注册时检测 Windows 原生组件，不兼容会拒绝）
+        </label>
       </div>
       {msg && <div className="form-err">{msg}</div>}
       <div className="row">

@@ -12,6 +12,8 @@ import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
 import { hostGitAvailable, setupProjectGit } from './hostgit.js';
 import { checkIsolationCompatibility } from './platform.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
@@ -53,6 +55,80 @@ export function buildServer(deps: {
 
   // ── projects ──
   app.get('/api/projects', async () => ({ projects: store.listProjects() }));
+  /** 项目配置更新：模式切换 / extraPackages / mcpServers —— 切到 isolation 时重新守门检测 */
+  app.patch<{ Params: { id: string }; Body: { execution?: string; extraPackages?: string[]; mcpServers?: string[] } }>(
+    '/api/projects/:id', async (req, reply) => {
+      const p = store.getProject(Number(req.params.id));
+      if (!p) return reply.code(404).send({ error: 'not found' });
+      const { execution, extraPackages, mcpServers } = req.body ?? ({} as any);
+
+      let nextExecution = execution ?? p.execution ?? 'capability';
+      if (!['capability', 'isolation'].includes(nextExecution)) {
+        return reply.code(400).send({ error: 'execution 必须是 capability|isolation' });
+      }
+
+      // 模式切换到 isolation → 重新跑守门检测（capability 无需，永远可切）
+      let platformNote: string | undefined;
+      if (nextExecution === 'isolation') {
+        const plat = await checkIsolationCompatibility(p.workspace_path);
+        if (!plat.ok) {
+          return reply.code(409).send({
+            error: `${plat.summary}。无法切换到隔离模式。建议保持 capability，或先移除项目中的 Windows 原生组件。`,
+          });
+        }
+        platformNote = plat.summary;
+      }
+
+      const updated = store.updateProject(p.id, {
+        execution: nextExecution,
+        ...(extraPackages !== undefined ? { extraPackages } : {}),
+        ...(mcpServers !== undefined ? { mcpServers } : {}),
+      });
+      return { project: updated, ...(platformNote ? { platform: platformNote } : {}) };
+    },
+  );
+
+  /** 重新检测：清单工具 + （isolation 时）平台兼容性。返回可读的体检报告 */
+  app.post<{ Params: { id: string } }>('/api/projects/:id/recheck', async (req, reply) => {
+    const p = store.getProject(Number(req.params.id));
+    if (!p) return reply.code(404).send({ error: 'not found' });
+
+    const report: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+    // ① 宿主工具清单
+    const gitInfo = await hostGitAvailable();
+    report.push({ name: '宿主 git', ok: gitInfo.ok, detail: gitInfo.ok ? gitInfo.version : '未安装（安全网依赖）' });
+
+    // ② 执行模式相关
+    if ((p.execution ?? 'capability') === 'isolation') {
+      const plat = await checkIsolationCompatibility(p.workspace_path);
+      report.push({ name: '平台兼容性（隔离模式）', ok: plat.ok, detail: plat.summary });
+      if (!plat.ok) {
+        report.push({ name: '建议', ok: false, detail: "切换 execution='capability'（PATCH /api/projects/<id>）" });
+      }
+    } else {
+      report.push({ name: '执行模式', ok: true, detail: 'capability（宿主原生执行，无平台限制）' });
+    }
+
+    // ③ 凭证
+    const isCap = (p.execution ?? 'capability') === 'capability';
+    const authPath = join(process.env.USERPROFILE ?? homedir(), '.codex', 'auth.json');
+    report.push({ name: 'Codex 凭证', ok: existsSync(authPath), detail: existsSync(authPath) ? 'auth.json 存在' : '缺失（重新登录）' });
+
+    // ④ 项目路径
+    report.push({ name: '项目路径', ok: existsSync(p.workspace_path), detail: p.workspace_path });
+
+    return { project: p, report };
+  });
+
+  /** 删除项目（不删任务历史；workspace 文件不受影响） */
+  app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
+    const p = store.getProject(Number(req.params.id));
+    if (!p) return reply.code(404).send({ error: 'not found' });
+    store.deleteProject(p.id);
+    return { ok: true, deleted: p.name };
+  });
+
   app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; execution?: 'capability' | 'isolation'; extraPackages?: string[]; mcpServers?: string[] } }>(
     '/api/projects', async (req, reply) => {
       const { name, workspace_path, agent_id = 'codex', execution = 'capability', extraPackages, mcpServers } = req.body ?? ({} as any);

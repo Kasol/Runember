@@ -39,8 +39,14 @@ export const client = {
   drafts: () => api<{ drafts: Task[] }>('GET', '/api/drafts'),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
-  createProject: (name: string, workspace_path: string, agent_id = 'codex') =>
-    api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id }),
+  createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability') =>
+    api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id, execution }),
+  updateProject: (id: number, body: { execution?: string; extraPackages?: string[]; mcpServers?: string[] }) =>
+    api<{ project: Project }>('PATCH', `/api/projects/${id}`, body),
+  recheckProject: (id: number) =>
+    api<{ report: Array<{ name: string; ok: boolean; detail: string }> }>('POST', `/api/projects/${id}/recheck`),
+  deleteProject: (id: number) =>
+    api<{ ok: boolean }>('DELETE', `/api/projects/${id}`),
   action: (id: number, type: string, feedback?: string) =>
     api<{ ok: boolean; message?: string }>('POST', `/api/tasks/${id}/actions`, { type, feedback }),
 };

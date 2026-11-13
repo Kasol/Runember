@@ -86,6 +86,21 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM projects WHERE name=?').get(name) as any;
     return row ? this.parseProject(row) : undefined;
   }
+  updateProject(id: number, patch: { execution?: string; extraPackages?: string[]; mcpServers?: string[] }): Project {
+    if (patch.execution) this.db.prepare('UPDATE projects SET execution=? WHERE id=?').run(patch.execution, id);
+    if (patch.extraPackages !== undefined) {
+      this.db.prepare('UPDATE projects SET extra_packages=? WHERE id=?')
+        .run(patch.extraPackages?.length ? JSON.stringify(patch.extraPackages) : null, id);
+    }
+    if (patch.mcpServers !== undefined) {
+      this.db.prepare('UPDATE projects SET mcp_servers=? WHERE id=?')
+        .run(patch.mcpServers?.length ? JSON.stringify(patch.mcpServers) : null, id);
+    }
+    return this.getProject(id)!;
+  }
+  deleteProject(id: number): void {
+    this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
+  }
   listProjects(): Project[] {
     return (this.db.prepare('SELECT * FROM projects ORDER BY id').all() as any[]).map(r => this.parseProject(r));
   }
