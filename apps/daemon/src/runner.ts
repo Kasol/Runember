@@ -271,6 +271,8 @@ export class Runner {
       let sessionId: string | undefined;
       let lastAgentText = '';
       const isNative = (project.execution ?? 'capability') === 'capability';
+      // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
+      const nativeEnv = this.proxyEnv();
       const onLine = (line: string) => {
         appendFileSync(logPath, line + '\n');
         const ev = adapter.parseLine(line);
@@ -281,7 +283,7 @@ export class Runner {
       const main = isNative
         ? await this.runNativePath({
             adapterImage: adapter.image, cmd,
-            cwd: project.workspace_path, env,
+            cwd: project.workspace_path, env: nativeEnv,
             timeoutMs: tmo, tag: `run-${run.id}`,
             onStdoutLine: onLine,
           })
