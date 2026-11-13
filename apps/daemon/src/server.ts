@@ -11,6 +11,7 @@ import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
 import { hostGitAvailable, setupProjectGit } from './hostgit.js';
+import { checkIsolationCompatibility } from './platform.js';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
@@ -52,26 +53,40 @@ export function buildServer(deps: {
 
   // ── projects ──
   app.get('/api/projects', async () => ({ projects: store.listProjects() }));
-  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; extraPackages?: string[] } }>(
+  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; execution?: 'capability' | 'isolation'; extraPackages?: string[]; mcpServers?: string[] } }>(
     '/api/projects', async (req, reply) => {
-      const { name, workspace_path, agent_id = 'codex', extraPackages } = req.body ?? ({} as any);
+      const { name, workspace_path, agent_id = 'codex', execution = 'capability', extraPackages, mcpServers } = req.body ?? ({} as any);
       if (!name || !workspace_path) return reply.code(400).send({ error: 'name 与 workspace_path 必填' });
       if (!availableAgents().includes(agent_id)) return reply.code(400).send({ error: `未知 agent: ${agent_id}` });
+      if (!['capability', 'isolation'].includes(execution)) return reply.code(400).send({ error: `execution 必须是 capability|isolation` });
       if (store.findProject(name)) return reply.code(409).send({ error: `项目名已存在: ${name}` });
       if (!existsSync(workspace_path)) return reply.code(400).send({ error: `路径不存在: ${workspace_path}` });
       if (extraPackages && !Array.isArray(extraPackages)) return reply.code(400).send({ error: 'extraPackages 必须是字符串数组' });
 
-      // 宿主环境防护：git 可用性 + 仓库级配置自动化（用户零心智负担）
+      // 宿主工具清单检查（所有模式共用：git 必须存在——安全网依赖）
       const gitInfo = await hostGitAvailable();
       if (!gitInfo.ok) {
         return reply.code(400).send({ error: '宿主机未安装 git —— agentdesk 的安全网（checkpoint）依赖它。请安装 git 后重试。' });
       }
-      const gitCfg = await setupProjectGit(workspace_path);
 
-      const project = store.addProject(name, workspace_path, agent_id, extraPackages);
+      // isolation 模式守门员：检测 Linux 容器无法加载的组件，命中即拒绝并提示切换 capability
+      let platformNote = '';
+      if (execution === 'isolation') {
+        const plat = await checkIsolationCompatibility(workspace_path);
+        if (!plat.ok) {
+          return reply.code(400).send({
+            error: `${plat.summary}。隔离模式（Linux 容器）无法运行。建议：execution='capability'（能力优先，codex 直接跑宿主）后重试。`,
+          });
+        }
+        platformNote = plat.summary;
+      }
+
+      const gitCfg = await setupProjectGit(workspace_path);
+      const project = store.addProject(name, workspace_path, agent_id, execution, extraPackages, mcpServers);
       return reply.code(201).send({
         project,
         git: { version: gitInfo.version, config: gitCfg.message },
+        ...(platformNote ? { platform: platformNote } : {}),
       });
     },
   );

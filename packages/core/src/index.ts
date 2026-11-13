@@ -32,19 +32,38 @@ export type BlockedKind =
   | 'timeout'            // 超时被看门狗击杀
   | 'unknown_error';
 
+/**
+ * 执行模式：
+ *  - capability（默认）：能力优先。codex 直接跑宿主（原生速度、Windows 原生依赖可用、
+ *    skills/auth 原生）。定位：离线调度机——无人操作、无竞态前提，共享宿主状态安全。
+ *  - isolation：隔离优先。Linux 容器执行（强隔离、环境钉版本）。
+ *    注册时检测项目内 Linux 不支持的组件（Windows 原生二进制等），有则拒绝并提示切换 capability。
+ */
+export type ExecutionMode = 'capability' | 'isolation';
+
 export interface Project {
   id: number;
   name: string;
-  /** host-dir 模式：宿主机上的项目绝对路径（bind mount 源） */
+  /** 项目绝对路径 */
   workspace_path: string;
   agent_id: AgentId;
-  /** 执行后端：docker（默认，隔离）| native（codex 直接跑宿主，原生速度/零播种） */
-  execution?: 'docker' | 'native';
-  /** 项目级系统依赖声明（依赖三层通道：宿主 daemon 预装进项目专属镜像） */
+  /** 执行模式，默认 capability */
+  execution?: ExecutionMode;
+  /** 隔离模式专用：项目级系统依赖（预装进项目专属镜像） */
   extraPackages?: string[];
-  /** 项目声明的 MCP server 名（daemon 渲染进容器 config.toml，agent 会话内可用） */
+  /** 隔离模式专用：项目声明的 MCP server 名（渲染进容器 config.toml） */
   mcpServers?: string[];
   created_at: string;
+}
+
+/**
+ * 宿主工具清单：清单内的工具【始终走宿主】且必须存在（注册/运行前强制检查）。
+ * 内置默认 git；config.hostTools 可扩展。
+ */
+export interface HostTool {
+  /** which/检测命令参数（如 --version） */
+  checkArgs?: string[];
+  required?: boolean;
 }
 
 export interface Task {

@@ -22,6 +22,9 @@ export class Store {
     if (!cols.includes('mcp_servers')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN mcp_servers TEXT');
     }
+    if (!cols.includes('execution')) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN execution TEXT NOT NULL DEFAULT 'capability'");
+    }
     const tcols = (this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map(c => c.name);
     if (!tcols.includes('draft_order')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN draft_order INTEGER');
@@ -62,10 +65,16 @@ export class Store {
   }
 
   // ── projects ──
-  addProject(name: string, workspacePath: string, agentId: string, extraPackages?: string[]): Project {
+  addProject(
+    name: string, workspacePath: string, agentId: string,
+    execution: string = 'capability', extraPackages?: string[], mcpServers?: string[],
+  ): Project {
     const r = this.db.prepare(
-      'INSERT INTO projects(name, workspace_path, agent_id, extra_packages, created_at) VALUES (?,?,?,?,?)',
-    ).run(name, workspacePath, agentId, extraPackages?.length ? JSON.stringify(extraPackages) : null, new Date().toISOString());
+      'INSERT INTO projects(name, workspace_path, agent_id, execution, extra_packages, mcp_servers, created_at) VALUES (?,?,?,?,?,?,?)',
+    ).run(name, workspacePath, agentId, execution,
+      extraPackages?.length ? JSON.stringify(extraPackages) : null,
+      mcpServers?.length ? JSON.stringify(mcpServers) : null,
+      new Date().toISOString());
     return this.getProject(Number(r.lastInsertRowid))!;
   }
   getProject(id: number): Project | undefined {
@@ -87,7 +96,12 @@ export class Store {
       if (typeof v !== 'string' || !v) return undefined;
       try { const a = JSON.parse(v); return Array.isArray(a) ? a : undefined; } catch { return undefined; }
     };
-    return { ...row, extraPackages: parse(row.extra_packages), mcpServers: parse(row.mcp_servers) } as Project;
+    return {
+      ...row,
+      execution: row.execution ?? 'capability',
+      extraPackages: parse(row.extra_packages),
+      mcpServers: parse(row.mcp_servers),
+    } as Project;
   }
 
   // ── tasks ──

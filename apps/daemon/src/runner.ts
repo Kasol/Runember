@@ -10,6 +10,7 @@ import Docker from 'dockerode';
 import { Writable } from 'node:stream';
 import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
@@ -201,36 +202,47 @@ export class Runner {
     const binds = this.getSpawnBinds(project, adapter.homeVolume);
     const env = ['CODEX_HOME=/codex-home', ...this.proxyEnv()];
     const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
+    let effectiveImage: string = adapter.image;
+    // capability 模式：codex 直接跑宿主——auth/skills/MCP 全部原生（宿主 ~/.codex），
+    // 跳过播种/渲染/预装/凭证容器检查（那些是隔离模式的容器环境准备工作）。
+    const isCapability = (project.execution ?? 'capability') === 'capability';
 
     try {
-      // ① 播种宿主 skills（若有）→ MCP 声明渲染 → 项目级依赖预装 → 凭证自检
-      await this.seedSkills(adapter.homeVolume);
-      const mcp = project.mcpServers;
-      if (mcp?.length) {
-        const registry = (cfg.agents[project.agent_id] as any)?.mcp ?? {};
-        const { toml, written, skipped } = renderMcpToml(mcp, registry);
-        await writeMcpToVolume(this.deps.docker, adapter.homeVolume, toml);
-        if (skipped.length) {
-          console.warn(`[mcp] 未在注册表中的 MCP 声明已跳过: ${skipped.join(', ')}（cfg.agents.${project.agent_id}.mcp）`);
+      if (!isCapability) {
+        // ══ isolation 模式的容器环境准备 ══
+        await this.seedSkills(adapter.homeVolume);
+        const mcp = project.mcpServers;
+        if (mcp?.length) {
+          const registry = (cfg.agents[project.agent_id] as any)?.mcp ?? {};
+          const { toml, written, skipped } = renderMcpToml(mcp, registry);
+          await writeMcpToVolume(this.deps.docker, adapter.homeVolume, toml);
+          if (skipped.length) {
+            console.warn(`[mcp] 未在注册表中的 MCP 声明已跳过: ${skipped.join(', ')}（cfg.agents.${project.agent_id}.mcp）`);
+          }
+          if (written.length) console.log(`🔌 MCP 已注入容器配置: ${written.join(', ')}`);
         }
-        if (written.length) console.log(`🔌 MCP 已注入容器配置: ${written.join(', ')}`);
-      }
-      const extra = project.extraPackages;
-      if (extra?.length) {
-        // 项目专属镜像替代基础镜像执行本次 run（依赖内置于镜像，容器销毁不丢失）
-        const image = await this.installPackages(adapter.image, extra, project.id);
-        var effectiveImage = image;
+        const extra = project.extraPackages;
+        effectiveImage = extra?.length
+          ? await this.installPackages(adapter.image, extra, project.id)
+          : adapter.image;
+        await this.ensureVolume(adapter.homeVolume);
+        const auth = await this.spawn({
+          image: adapter.image, cmd: adapter.authCheckArgs(), binds,
+          env: [], timeoutMs: 60_000, tag: `auth-${run.id}`,
+        });
+        if (auth.exitCode !== 0) {
+          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
+            { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath, auth.exitCode);
+        }
       } else {
-        var effectiveImage = adapter.image;
-      }
-      await this.ensureVolume(adapter.homeVolume);
-      const auth = await this.spawn({
-        image: adapter.image, cmd: adapter.authCheckArgs(), binds,
-        env: [], timeoutMs: 60_000, tag: `auth-${run.id}`,
-      });
-      if (auth.exitCode !== 0) {
-        return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-          { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath, auth.exitCode);
+        // ══ capability 模式的宿主环境自检 ══
+        // auth：宿主 ~/.codex/auth.json（GUI/CLI 登录态原生共享）
+        const authPath = join(process.env.USERPROFILE ?? homedir(), '.codex', 'auth.json');
+        if (!existsSync(authPath)) {
+          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
+            { agentMessage: '凭证缺失（capability 模式读宿主 ~/.codex/auth.json）：请先完成 codex 登录', filesChanged: [], diffStat: '' }, logPath, undefined);
+        }
+        // codex CLI 在宿主 PATH 可用性：真正执行时由 runNative 的 spawn error 路径兜底报告
       }
 
       // ② checkpoint：宿主侧执行（继承用户 LFS/filemode 配置，容器不再触碰 .git）
@@ -249,7 +261,7 @@ export class Runner {
 
       let sessionId: string | undefined;
       let lastAgentText = '';
-      const isNative = project.execution === 'native';
+      const isNative = (project.execution ?? 'capability') === 'capability';
       const onLine = (line: string) => {
         appendFileSync(logPath, line + '\n');
         const ev = adapter.parseLine(line);

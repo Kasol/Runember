@@ -1,7 +1,7 @@
 /**
  * NativeBackend —— codex 直接跑宿主进程（无容器）。
  *
- * 适用场景（project add 时按项目选择 execution: 'docker' | 'native'，默认 docker）：
+ * 适用场景（project add 时按项目选择 execution: 'capability' | 'isolation'，默认 capability）：
  *  - 个人开发机、想原生速度（无 bind mount 性能损耗）
  *  - skills/auth/配置全部原生，零播种
  *
