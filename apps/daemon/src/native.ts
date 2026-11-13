@@ -13,6 +13,35 @@
  */
 import { spawn as nodeSpawn, ChildProcess } from 'node:child_process';
 import { Writable } from 'node:stream';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * 宿主 codex CLI 发现：
+ *  1. PATH 上的 codex（用户自装优先，如 npm -g）
+ *  2. GUI 私有运行时：%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe 取最新
+ *     （GUI 故意不注入 PATH——内核版本由 GUI 自管；哈希目录随升级变化，
+ *      所以每次发现而非硬编码。结果带缓存，进程内复用。）
+ */
+let codexPathCache: string | undefined;
+
+export function findHostCodex(): string | undefined {
+  if (codexPathCache && existsSync(codexPathCache)) return codexPathCache;
+
+  const localAppData = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? '', 'AppData', 'Local');
+  const guiBinRoot = join(localAppData, 'OpenAI', 'Codex', 'bin');
+  if (existsSync(guiBinRoot)) {
+    let best: { path: string; mtime: number } | undefined;
+    for (const hash of readdirSync(guiBinRoot)) {
+      const exe = join(guiBinRoot, hash, 'codex.exe');
+      if (!existsSync(exe)) continue;
+      const mtime = statSync(exe).mtimeMs;
+      if (!best || mtime > best.mtime) best = { path: exe, mtime };
+    }
+    if (best) { codexPathCache = best.path; return codexPathCache; }
+  }
+  return undefined;
+}
 
 export interface NativeProc {
   exitCode: number;

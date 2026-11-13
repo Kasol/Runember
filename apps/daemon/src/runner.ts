@@ -16,6 +16,7 @@ import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
 import { renderMcpToml, writeMcpToVolume } from './mcp.js';
 import { runNative } from './native.js';
+import { findHostCodex } from './native.js';
 import type { Task, Project, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -173,8 +174,10 @@ export class Runner {
     adapterImage: string; cmd: string[]; cwd: string; env: string[];
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
   }): Promise<{ exitCode: number; killed: boolean; out: string[]; err: string[] }> {
-    // 宿主命令映射：容器内是 'codex ...'，宿主 PATH 上也是 codex（CLI 原生安装）
-    const cmd = opts.cmd[0] === 'codex' ? ['codex', ...opts.cmd.slice(1)] : opts.cmd;
+    // 命令映射：容器内 'codex ...' → 宿主实际发现的 codex 可执行路径
+    const hostCodex = findHostCodex();
+    if (!hostCodex) throw new Error('宿主 codex CLI 未找到（findHostCodex）');
+    const cmd = opts.cmd[0] === 'codex' ? [hostCodex, ...opts.cmd.slice(1)] : opts.cmd;
     return runNative({
       cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
       onStdoutLine: opts.onStdoutLine,
@@ -236,13 +239,19 @@ export class Runner {
         }
       } else {
         // ══ capability 模式的宿主环境自检 ══
+        // codex CLI：发现宿主可用版本（PATH 优先 → GUI 私有运行时最新版）
+        const hostCodex = findHostCodex();
+        if (!hostCodex) {
+          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
+            { agentMessage: '宿主上未发现 codex CLI（PATH 无 codex，且未找到 GUI 运行时）。请安装 codex CLI 后重试。', filesChanged: [], diffStat: '' }, logPath, undefined);
+        }
+        console.log(`🔍 [capability] 宿主 codex: ${hostCodex}`);
         // auth：宿主 ~/.codex/auth.json（GUI/CLI 登录态原生共享）
         const authPath = join(process.env.USERPROFILE ?? homedir(), '.codex', 'auth.json');
         if (!existsSync(authPath)) {
           return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
             { agentMessage: '凭证缺失（capability 模式读宿主 ~/.codex/auth.json）：请先完成 codex 登录', filesChanged: [], diffStat: '' }, logPath, undefined);
         }
-        // codex CLI 在宿主 PATH 可用性：真正执行时由 runNative 的 spawn error 路径兜底报告
       }
 
       // ② checkpoint：宿主侧执行（继承用户 LFS/filemode 配置，容器不再触碰 .git）
