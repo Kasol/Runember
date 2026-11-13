@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { client, STATUS_META, type Project, type Task, type Run } from './api';
+import { Modal, Labeled, FormActions } from './ui';
 
 type Scope = number | 'all';
 
@@ -201,7 +202,7 @@ function ProjectStrip(props: {
         <h2>📁 项目</h2>
         <button className="new-task" onClick={() => setShowAdd(v => !v)}>＋ 添加项目</button>
       </div>
-      {showAdd && <AddProject projects={props.projects} onCreated={() => { setShowAdd(false); props.onChanged(); }} />}
+      {showAdd && <AddProject onCreated={() => { setShowAdd(false); props.onChanged(); }} />}
       <div className="strip-cards">
         <div className={`proj-card all ${props.selected === 'all' ? 'selected' : ''}`}
           onClick={() => props.onSelect('all')}>
@@ -247,8 +248,8 @@ function ProjectStrip(props: {
   );
 }
 
-/** 添加项目表单（Strip 内展开）：名称/路径/执行模式（注册时守门检测） */
-function AddProject(props: { projects: Project[]; onCreated: () => void }) {
+/** 添加项目弹窗：名称/路径/执行模式（注册时守门检测） */
+function AddProject(props: { onCreated: () => void }) {
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
@@ -269,36 +270,31 @@ function AddProject(props: { projects: Project[]; onCreated: () => void }) {
   };
 
   return (
-    <div className="new-task-box">
-      <div className="field-row">
-        <input
-          placeholder="项目名（如 myapp）"
-          value={name} onChange={e => setName(e.target.value)}
-        />
-        <input
-          placeholder="本地 git 仓库的绝对路径（如 D:/work/myapp）"
-          value={path} onChange={e => setPath(e.target.value)}
-          style={{ flex: 2 }}
-        />
-      </div>
-      <div className="mode-select">
-        <label>
-          <input type="radio" checked={execution === 'capability'} onChange={() => setExecution('capability')} />
-          ⚡ 能力优先（默认）— codex 直接跑宿主，原生依赖可用
-        </label>
-        <label>
-          <input type="radio" checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
-          🛡 隔离优先 — Linux 容器执行（注册时检测 Windows 原生组件，不兼容会拒绝）
-        </label>
-      </div>
+    <Modal title="📁 添加项目" onClose={() => props.onCreated()} width={560}>
+      <Labeled label="项目名">
+        <input placeholder="如 myapp" value={name} onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') void submit(); }} />
+      </Labeled>
+      <Labeled label="本地 git 仓库的绝对路径">
+        <input placeholder="如 D:/work/myapp" value={path} onChange={e => setPath(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') void submit(); }} />
+      </Labeled>
+      <Labeled label="执行模式">
+        <div className="mode-select">
+          <label>
+            <input type="radio" checked={execution === 'capability'} onChange={() => setExecution('capability')} />
+            ⚡ 能力优先（默认）— codex 直接跑宿主，原生依赖可用
+          </label>
+          <label>
+            <input type="radio" checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
+            🛡 隔离优先 — Linux 容器执行（注册时检测 Windows 原生组件，不兼容会拒绝）
+          </label>
+        </div>
+      </Labeled>
       {msg && <div className="form-err">{msg}</div>}
-      <div className="row">
-        <button className="primary" disabled={busy || !name.trim() || !path.trim()} onClick={() => void submit()}>
-          {busy ? '注册中…' : '注册'}
-        </button>
-        <button onClick={() => props.onCreated()}>收起</button>
-      </div>
-    </div>
+      <FormActions primary={busy ? '注册中…' : '注册'} onPrimary={() => void submit()}
+        disabled={busy || !name.trim() || !path.trim()} secondary="取消" onSecondary={() => props.onCreated()} />
+    </Modal>
   );
 }
 
@@ -472,20 +468,20 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
     return <button className="new-task" onClick={() => setOpen(true)}>＋ 新建任务（存草稿）</button>;
   }
   return (
-    <div className="new-task-box">
-      <select value={project} onChange={e => setProject(e.target.value)}>
-        {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </select>
-      <textarea
-        placeholder="描述任务，保存后进入草稿队列，点「执行」才运行"
-        value={prompt} onChange={e => setPrompt(e.target.value)} rows={3}
-      />
-      <div className="row">
-        <button className="primary" disabled={busy || !prompt.trim()} onClick={() => void submit()}>
-          {busy ? '保存中…' : '存草稿'}
-        </button>
-        <button onClick={() => setOpen(false)}>收起</button>
-      </div>
-    </div>
+    <Modal title="📝 新建任务（存草稿）" onClose={() => setOpen(false)} width={560}>
+      <Labeled label="项目">
+        <select value={project} onChange={e => setProject(e.target.value)}>
+          {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Labeled>
+      <Labeled label="任务描述">
+        <textarea
+          placeholder="保存后进入草稿队列，点「执行」才运行"
+          value={prompt} onChange={e => setPrompt(e.target.value)} rows={4}
+        />
+      </Labeled>
+      <FormActions primary={busy ? '保存中…' : '存草稿'} onPrimary={() => void submit()}
+        disabled={busy || !prompt.trim()} secondary="取消" onSecondary={() => setOpen(false)} />
+    </Modal>
   );
 }
