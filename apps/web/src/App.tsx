@@ -446,11 +446,13 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // 跟随当前选中的项目
+  // 弹窗打开时同步默认项目（跟随当前选中）；打开后允许用户自由切换，不再回写
   useEffect(() => {
+    if (!open) return;
     if (typeof props.defaultProjectId === 'number') setProject(String(props.defaultProjectId));
     else if (props.projects.length && !project) setProject(String(props.projects[0]!.id));
-  }, [props.defaultProjectId, props.projects, project]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间初始化
+  }, [open]);
 
   const submit = async () => {
     if (!prompt.trim() || busy) return;
