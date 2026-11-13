@@ -9,7 +9,10 @@ export interface Project {
 export interface Task {
   id: number; project_id: number; prompt: string;
   status: TaskStatus; pending_feedback: string | null;
-  draft_order?: number | null; created_at: string;
+  draft_order?: number | null;
+  /** 部分完成：agent 自报的未完成清单（非空 = partial） */
+  partial_remaining?: string | null;
+  created_at: string;
 }
 export interface Run {
   id: number; task_id: number; kind: 'normal' | 'resume';

@@ -70,6 +70,15 @@ export default function App() {
     try { await client.action(id, 'cancel'); await refresh(); } catch (e: any) { alert(e?.message ?? '删除失败'); }
   };
 
+  /** 从部分完成的结果一键创建后续草稿（同项目，原任务 + 剩余清单） */
+  const followup = async (t: Task) => {
+    try {
+      const prompt = `${t.prompt}\n\n[后续任务] 上次执行部分完成，未完成部分：${t.partial_remaining}`;
+      await client.createTask(t.project_id, prompt, true);
+      await refresh();
+    } catch (e: any) { alert(e?.message ?? '创建失败'); }
+  };
+
   const selectProject = (s: Scope) => {
     localStorage.setItem('agentdesk.scope-touched', '1');
     setSelected(s);
@@ -130,7 +139,10 @@ export default function App() {
           empty={done.length ? null : '暂无'}>
           {done.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)} />
+              onOpen={() => setSelectedTask(t)}
+              partial={!!t.partial_remaining}
+              partialRemaining={t.partial_remaining ?? undefined}
+              onFollowup={followup} />
           ))}
         </Column>
         <Column title={`❌ 失败 (${failed.length})`} tone="failed"
@@ -308,16 +320,32 @@ function Column(props: { title: string; tone: string; empty: string | null; chil
   );
 }
 
-function Card(props: { task: Task; project?: string; onOpen: () => void; actions?: React.ReactNode }) {
+function Card(props: {
+  task: Task; project?: string; onOpen: () => void; actions?: React.ReactNode;
+  partial?: boolean; partialRemaining?: string; onFollowup?: (t: Task) => Promise<void>;
+}) {
   const meta = STATUS_META[props.task.status];
   return (
     <div className="card" onClick={props.onOpen}>
       <div className="card-head">
         <span className="badge" style={{ color: meta.color, background: meta.bg }}>{meta.label}</span>
+        {props.partial && <span className="badge partial">⚠️ 部分</span>}
         <span className="pid">#{props.task.id} · {props.project}</span>
       </div>
       <div className="prompt">{props.task.prompt}</div>
-      {props.actions && <div className="card-actions" onClick={e => e.stopPropagation()}>{props.actions}</div>}
+      {props.partial && props.partialRemaining && (
+        <div className="partial-note">📋 未完成：{props.partialRemaining.slice(0, 60)}</div>
+      )}
+      {(props.actions || (props.partial && props.onFollowup)) && (
+        <div className="card-actions" onClick={e => e.stopPropagation()}>
+          {props.actions}
+          {props.partial && props.onFollowup && (
+            <button title="以原任务+未完成清单创建后续草稿" onClick={() => void props.onFollowup!(props.task)}>
+              📎 后续任务
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

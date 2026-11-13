@@ -73,6 +73,8 @@ export interface Task {
   status: TaskStatus;
   /** resume 时携带的人工反馈；runner 据此决定是新会话还是续会话 */
   pending_feedback?: string;
+  /** 部分完成时 agent 自报的未完成清单（非空 = partial；供人决定是否派后续任务） */
+  partial_remaining?: string | null;
   created_at: string;
 }
 
@@ -97,12 +99,27 @@ export interface RunSummary {
   diffStat: string;
   sessionId?: string;
   usageNote?: string;
+  /** 结果报告：partial = agent 自报部分完成（人类需决定后续任务） */
+  partial?: boolean;
+  remaining?: string;
+}
+
+/** 从 agent 末条消息解析结果标记（宽容式：无标记/坏 JSON 返回 null） */
+export function parseResultMarker(text: string): { done: boolean; summary?: string; remaining?: string } | null {
+  const line = text.split('\n').reverse().find(l => l.includes(AGENTCTL_RESULT_MARKER));
+  if (!line) return null;
+  try {
+    const j = JSON.parse(line.slice(line.indexOf(AGENTCTL_RESULT_MARKER) + AGENTCTL_RESULT_MARKER.length).trim());
+    return { done: j.done !== false, summary: j.summary, remaining: j.remaining };
+  } catch { return null; }
 }
 
 // ─────────────────────────── 阻塞协议 ───────────────────────────
 
 /** agent 主动声明"需要人"的约定标记（注入到任务 prompt 的契约里） */
 export const AGENTCTL_MARKER = '###AGENTCTL_BLOCKED###';
+/** agent 收尾时报告结果的结构化标记（区分"全部完成"与"部分完成"） */
+export const AGENTCTL_RESULT_MARKER = '###AGENTCTL_RESULT###';
 
 /** 注入给 agent 的阻塞契约（由 adapter 拼进 prompt 尾部） */
 export const AGENTCTL_CONTRACT = [
@@ -117,7 +134,11 @@ export const AGENTCTL_CONTRACT = [
   '并在 question 里精确列出缺失项与宿主侧安装方式（如 "apt-get install resvg" 或 "需预装 X"），一次问清。',
   '3. 平台未配置的外部工具（MCP/浏览器调试等）不存在，不要请求启用它们；',
   '若有合理的降级方案（如跳过某类验收），在 question 里给出明确的降级选项供人选择。',
-  '4. 其余情况正常完成任务即可。不要执行 git push。',
+  `4. 【结果报告】结束前，必须输出一行以 ${AGENTCTL_RESULT_MARKER} 开头的 JSON：`,
+  `全部完成 → ${AGENTCTL_RESULT_MARKER} {"done":true,"summary":"一句话结果"}`,
+  `部分完成/中途停止 → ${AGENTCTL_RESULT_MARKER} {"done":false,"summary":"已完成什么","remaining":"明确列出未完成的部分"}`,
+  '"部分完成"不会被当作完整成功，人类会依据 remaining 决定后续（如派发后续任务）。',
+  '5. 其余情况正常完成任务即可。不要执行 git push。',
 ].join('\n');
 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────

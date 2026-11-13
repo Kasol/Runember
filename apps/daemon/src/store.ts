@@ -29,6 +29,9 @@ export class Store {
     if (!tcols.includes('draft_order')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN draft_order INTEGER');
     }
+    if (!tcols.includes('partial_remaining')) {
+      this.db.exec('ALTER TABLE tasks ADD COLUMN partial_remaining TEXT');
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS projects(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +49,7 @@ export class Store {
         status TEXT NOT NULL DEFAULT 'queued',
         pending_feedback TEXT,
         draft_order INTEGER,
+        partial_remaining TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS runs(
@@ -146,6 +150,10 @@ export class Store {
   setTaskStatus(id: number, status: TaskStatus): void {
     this.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(status, id);
     if (status !== 'draft') this.db.prepare('UPDATE tasks SET draft_order=NULL WHERE id=?').run(id);
+  }
+  /** 记录部分完成的剩余清单（非空 = partial）；入队/重跑时清空 */
+  setTaskPartial(id: number, remaining: string | null): void {
+    this.db.prepare('UPDATE tasks SET partial_remaining=? WHERE id=?').run(remaining, id);
   }
 
   /** 草稿操作：编辑提示词 / 移动顺序 */

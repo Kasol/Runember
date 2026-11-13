@@ -46,10 +46,11 @@ export function buildEventMarkdown(
   }
   if (e.kind === 'run.succeeded') {
     const s = e.summary;
+    const partial = s.partial === true;
     return {
-      title: '✅ agentdesk 任务完成',
+      title: partial ? '⚠️ agentdesk 任务部分完成' : '✅ agentdesk 任务完成',
       text: [
-        '### ✅ 任务完成',
+        partial ? '### ⚠️ 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
         LINE + `**${t}**`,
         HR,
         s.agentMessage ? `**📝 agent 总结**${LINE}> ${s.agentMessage.replace(/\n/g, LINE + '> ').slice(0, 260)}` : '',
@@ -58,6 +59,10 @@ export function buildEventMarkdown(
           ? `**🗂 改动 ${s.filesChanged.length} 个文件**${LINE}${s.filesChanged.slice(0, 5).map(f => `- \`${f}\``).join(LINE)}${s.filesChanged.length > 5 ? LINE + '- …' : ''}`
           : '🗂 无文件改动',
         s.diffStat ? LINE + `\`${s.diffStat.replace(/\n/g, ' · ').slice(0, 120)}\`` : '',
+        partial && s.remaining
+          ? HR + `**📋 未完成部分**（可派后续任务）：${LINE}> ${s.remaining.slice(0, 200)}` +
+            LINE + `回复 \`draft ${e.project.name} 继续完成：${s.remaining.slice(0, 40)}\``
+          : '',
         detailLink,
       ].join(''),
     };

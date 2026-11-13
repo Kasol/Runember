@@ -11,7 +11,7 @@ import { Writable } from 'node:stream';
 import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER } from '@agentdesk/core';
+import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER, parseResultMarker } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
 import { renderMcpToml, writeMcpToVolume } from './mcp.js';
@@ -200,6 +200,7 @@ export class Runner {
     store.updateRun(run.id, { status: 'running', started_at: new Date().toISOString(), log_path: logPath });
     store.setTaskStatus(task.id, 'running');
     store.setPendingFeedback(task.id, null); // 反馈已被本次 Run 消费
+    store.setTaskPartial(task.id, null);     // 旧的"部分完成"标记随新执行失效
     events.emit({ kind: 'run.started', task, project });
 
     const binds = this.getSpawnBinds(project, adapter.homeVolume);
@@ -306,7 +307,19 @@ export class Runner {
         lastAgentText,
         errTail: main.err.slice(-20).join('\n'),
       });
-      const summary: RunSummary = { agentMessage: lastAgentText || undefined, filesChanged, diffStat, sessionId };
+      // 结果报告（result 标记）：agent 自报部分完成 → 记录 remaining 供人决定后续
+      const report = parseResultMarker(lastAgentText);
+      const summary: RunSummary = {
+        agentMessage: lastAgentText || undefined,
+        filesChanged, diffStat, sessionId,
+        partial: report ? !report.done : undefined,
+        remaining: report?.remaining,
+      };
+      if (result.status === 'succeeded' && summary.partial) {
+        store.setTaskPartial(task.id, summary.remaining ?? '（agent 未给出明细）');
+      } else {
+        store.setTaskPartial(task.id, null);
+      }
       this.finish(task, project, run.id, result, summary, logPath, main.exitCode);
     } catch (e: any) {
       this.finish(task, project, run.id,

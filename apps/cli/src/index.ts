@@ -63,6 +63,7 @@ async function main(): Promise<void> {
             `${r.session_id ? ' session=' + r.session_id.slice(0, 8) : ''}`);
           if (r.summary_json) {
             const s = JSON.parse(r.summary_json);
+            if (s.partial) console.log(`    ⚠️ 部分完成 — 未完成: ${String(s.remaining || '（未给出）').slice(0, 80)}`);
             if (s.agentMessage) console.log(`    💬 ${String(s.agentMessage).replace(/\n/g, ' ').slice(0, 120)}`);
             if (s.filesChanged?.length) console.log(`    📝 改动 ${s.filesChanged.length} 个文件: ${s.filesChanged.slice(0, 5).join(', ')}${s.filesChanged.length > 5 ? ' …' : ''}`);
           }
