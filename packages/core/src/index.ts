@@ -114,6 +114,15 @@ export function parseResultMarker(text: string): { done: boolean; summary?: stri
   } catch { return null; }
 }
 
+/** 展示用：剥掉协议标记行（BLOCKED/RESULT），只留人话 */
+export function stripAgentctlLines(text: string): string {
+  return text
+    .split('\n')
+    .filter(l => !l.includes(AGENTCTL_MARKER) && !l.includes(AGENTCTL_RESULT_MARKER))
+    .join('\n')
+    .trim();
+}
+
 // ─────────────────────────── 阻塞协议 ───────────────────────────
 
 /** agent 主动声明"需要人"的约定标记（注入到任务 prompt 的契约里） */

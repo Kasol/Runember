@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { client, STATUS_META, type Project, type Task, type Run } from './api';
+import { stripAgentctlLines } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 
 type Scope = number | 'all';
@@ -435,7 +436,7 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
         {summary?.agentMessage && (
           <div className="summary">
             <b>agent 总结</b>
-            <p>{summary.agentMessage}</p>
+            <p>{stripAgentctlLines(summary.agentMessage)}</p>
             {summary.filesChanged?.length > 0 && (
               <p className="dim">📝 改动 {summary.filesChanged.length} 个文件：{summary.filesChanged.slice(0, 6).join('、')}</p>
             )}

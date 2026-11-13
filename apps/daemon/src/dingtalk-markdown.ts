@@ -3,6 +3,7 @@
  * 修改通知样式只需改这一个文件。
  */
 import type { NotifyEvent } from '@agentdesk/core';
+import { stripAgentctlLines } from '@agentdesk/core';
 
 const LINE = '  \n';   // 钉钉 markdown 换行
 const HR = '  \n---\n'; // 分隔线
@@ -53,7 +54,7 @@ export function buildEventMarkdown(
         partial ? '### ⚠️ 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
         LINE + `**${t}**`,
         HR,
-        s.agentMessage ? `**📝 agent 总结**${LINE}> ${s.agentMessage.replace(/\n/g, LINE + '> ').slice(0, 260)}` : '',
+        s.agentMessage ? `**📝 agent 总结**${LINE}> ${stripAgentctlLines(s.agentMessage).replace(/\n/g, LINE + '> ').slice(0, 260) || '(见未完成部分)'}` : '',
         LINE,
         s.filesChanged.length
           ? `**🗂 改动 ${s.filesChanged.length} 个文件**${LINE}${s.filesChanged.slice(0, 5).map(f => `- \`${f}\``).join(LINE)}${s.filesChanged.length > 5 ? LINE + '- …' : ''}`

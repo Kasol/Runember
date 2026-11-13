@@ -9,6 +9,7 @@
  *   auth [codex]
  */
 import type { Task, Project, Run } from '@agentdesk/core';
+import { stripAgentctlLines } from '@agentdesk/core';
 
 const BASE = `http://127.0.0.1:${process.env.AGENTDESK_PORT ?? 8787}`;
 const TOKEN = process.env.AGENTDESK_TOKEN ?? '';
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
           if (r.summary_json) {
             const s = JSON.parse(r.summary_json);
             if (s.partial) console.log(`    ⚠️ 部分完成 — 未完成: ${String(s.remaining || '（未给出）').slice(0, 80)}`);
-            if (s.agentMessage) console.log(`    💬 ${String(s.agentMessage).replace(/\n/g, ' ').slice(0, 120)}`);
+            if (s.agentMessage) console.log(`    💬 ${stripAgentctlLines(String(s.agentMessage)).replace(/\n/g, ' ').slice(0, 120)}`);
             if (s.filesChanged?.length) console.log(`    📝 改动 ${s.filesChanged.length} 个文件: ${s.filesChanged.slice(0, 5).join(', ')}${s.filesChanged.length > 5 ? ' …' : ''}`);
           }
         }
