@@ -247,6 +247,61 @@ function ProjectStrip(props: {
   );
 }
 
+/** 添加项目表单（Strip 内展开）：名称/路径/执行模式（注册时守门检测） */
+function AddProject(props: { projects: Project[]; onCreated: () => void }) {
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const submit = async () => {
+    if (!name.trim() || !path.trim() || busy) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      await client.createProject(name.trim(), path.trim(), 'codex', execution);
+      setName('');
+      setPath('');
+      props.onCreated();
+    } catch (e: any) { setMsg(e?.message ?? '注册失败'); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="new-task-box">
+      <div className="field-row">
+        <input
+          placeholder="项目名（如 myapp）"
+          value={name} onChange={e => setName(e.target.value)}
+        />
+        <input
+          placeholder="本地 git 仓库的绝对路径（如 D:/work/myapp）"
+          value={path} onChange={e => setPath(e.target.value)}
+          style={{ flex: 2 }}
+        />
+      </div>
+      <div className="mode-select">
+        <label>
+          <input type="radio" checked={execution === 'capability'} onChange={() => setExecution('capability')} />
+          ⚡ 能力优先（默认）— codex 直接跑宿主，原生依赖可用
+        </label>
+        <label>
+          <input type="radio" checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
+          🛡 隔离优先 — Linux 容器执行（注册时检测 Windows 原生组件，不兼容会拒绝）
+        </label>
+      </div>
+      {msg && <div className="form-err">{msg}</div>}
+      <div className="row">
+        <button className="primary" disabled={busy || !name.trim() || !path.trim()} onClick={() => void submit()}>
+          {busy ? '注册中…' : '注册'}
+        </button>
+        <button onClick={() => props.onCreated()}>收起</button>
+      </div>
+    </div>
+  );
+}
+
 function Column(props: { title: string; tone: string; empty: string | null; children: React.ReactNode }) {
   return (
     <section className={`col tone-${props.tone}`}>
