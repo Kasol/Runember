@@ -10,7 +10,7 @@
 
 ## 快速开始
 
-前置：Docker Desktop（或 Engine）+ Node 22+。
+前置：Node 22+ 与 git（必需）；Docker Desktop（或 Engine）——仅**隔离模式**项目需要，纯能力优先项目无需 Docker。
 
 ```bash
 npm install
