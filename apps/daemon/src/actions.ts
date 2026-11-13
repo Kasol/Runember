@@ -86,10 +86,12 @@ export async function applyTaskAction(
     const all = store.listTasks().slice(0, 6);
     let md = br('### 📋 任务列表（最新 6 条）');
     for (const t of all) {
-      md += br() + br(`${badge(t.status)} **#${t.id}** \`${projectName(t.project_id)}\``);
+      const partialBadge = t.partial_remaining ? ' ⚠️部分' : '';
+      md += br() + br(`${badge(t.status)}${partialBadge} **#${t.id}** \`${projectName(t.project_id)}\``);
       md += br(`　${cut(t.prompt, 40)}`);
+      if (t.partial_remaining) md += br(`　📋 未完成: ${cut(t.partial_remaining, 36)}`);
     }
-    md += br() + br('> `resume <id> <决定>` / `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
+    md += br() + br('> `run <id> 继续`（部分完成续跑）/ `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
     return { ok: true, message: md };
   }
 
@@ -185,7 +187,21 @@ export async function applyTaskAction(
         scheduler.tickNow();
         return { ok: true, message: br(`### ✅ #${refId}(${projectName(t.project_id)}) 已带信息重新入队`) };
       }
-      return { ok: false, message: `#${refId} 当前 ${t.status}（仅 draft 可执行、blocked 可续跑；想重跑用 \`retry ${refId}\`）` };
+      if (t.status === 'done' && t.partial_remaining) {
+        // 部分完成 → 同会话续跑剩余部分（run 编号 = 继续语义）
+        store.setPendingFeedback(refId, prompt || '请继续完成剩余部分');
+        store.setTaskStatus(refId, 'queued');
+        scheduler.tickNow();
+        return {
+          ok: true,
+          message: br(`### ✅ #${refId}(${projectName(t.project_id)}) 继续执行剩余部分`) +
+            br() +
+            br(`📋 未完成：${cut(t.partial_remaining, 60)}`) +
+            (prompt ? br(`> 补充：${cut(prompt, 60)}`) : '') +
+            br('同一会话上下文续跑。'),
+        };
+      }
+      return { ok: false, message: `#${refId} 当前 ${t.status}（draft 可执行、blocked 可续跑、部分完成可继续；完整重跑用 \`retry ${refId}\`）` };
     }
 
     // ── 形态二：全新任务直接入队 ──
@@ -258,6 +274,17 @@ export async function applyTaskAction(
         task = blocked[0]!;
       }
       if (!task) return { ok: false, message: `任务 #${rid} 不存在` };
+      // 部分完成的 done 任务允许 resume（同会话继续剩余部分）
+      if (task.status === 'done' && task.partial_remaining) {
+        store.setPendingFeedback(rid, action.feedback ?? '请继续完成剩余部分');
+        store.setTaskStatus(rid, 'queued');
+        scheduler.tickNow();
+        return {
+          ok: true,
+          message: br(`### ✅ #${rid}(${projectName(task.project_id)}) 继续执行剩余部分`) +
+            br(`📋 未完成：${cut(task.partial_remaining, 60)}`),
+        };
+      }
       if (task.status !== 'blocked') {
         return {
           ok: false,

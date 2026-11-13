@@ -142,7 +142,8 @@ export default function App() {
               onOpen={() => setSelectedTask(t)}
               partial={!!t.partial_remaining}
               partialRemaining={t.partial_remaining ?? undefined}
-              onFollowup={followup} />
+              onFollowup={followup}
+              onContinue={t.partial_remaining ? () => void act(t.id, 'resume', '请继续完成剩余部分') : undefined} />
           ))}
         </Column>
         <Column title={`❌ 失败 (${failed.length})`} tone="failed"
@@ -322,7 +323,8 @@ function Column(props: { title: string; tone: string; empty: string | null; chil
 
 function Card(props: {
   task: Task; project?: string; onOpen: () => void; actions?: React.ReactNode;
-  partial?: boolean; partialRemaining?: string; onFollowup?: (t: Task) => Promise<void>;
+  partial?: boolean; partialRemaining?: string;
+  onFollowup?: (t: Task) => Promise<void>; onContinue?: () => void;
 }) {
   const meta = STATUS_META[props.task.status];
   return (
@@ -336,9 +338,14 @@ function Card(props: {
       {props.partial && props.partialRemaining && (
         <div className="partial-note">📋 未完成：{props.partialRemaining.slice(0, 60)}</div>
       )}
-      {(props.actions || (props.partial && props.onFollowup)) && (
+      {(props.actions || (props.partial && (props.onFollowup || props.onContinue))) && (
         <div className="card-actions" onClick={e => e.stopPropagation()}>
           {props.actions}
+          {props.partial && props.onContinue && (
+            <button className="primary" title="同会话继续完成剩余部分" onClick={() => props.onContinue?.()}>
+              ▶ 续跑
+            </button>
+          )}
           {props.partial && props.onFollowup && (
             <button title="以原任务+未完成清单创建后续草稿" onClick={() => void props.onFollowup!(props.task)}>
               📎 后续任务
