@@ -80,6 +80,9 @@ export class DingTalkStreamChannel implements FeedbackChannel {
     const client = new DWClient({
       clientId: this.cfg.clientId,
       clientSecret: this.cfg.clientSecret,
+      // 僵尸连接根治：WS ping/pong 心跳（8s 一轮，pong 不回即 terminate
+      // → close 事件 → SDK autoReconnect 自动重建）。默认 false，半开连接会永久僵尸。
+      keepAlive: true,
     });
 
     // ACK 补偿：registerCallbackListener 走 EventEmitter，async 监听器的返回值不会
