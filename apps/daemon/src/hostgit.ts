@@ -12,8 +12,10 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, unlinkSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 const pExecFile = promisify(execFile);
 
 export interface HostGitResult { ok: boolean; stdout: string; stderr: string }
@@ -28,11 +30,12 @@ export async function hostGitAvailable(): Promise<{ ok: boolean; version: string
   }
 }
 
-async function git(cwd: string, args: string[], timeoutMs = 60_000): Promise<HostGitResult> {
+async function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<HostGitResult> {
   try {
     const { stdout, stderr } = await pExecFile('git', args, {
       cwd,
-      timeout: timeoutMs,
+      timeout: 60_000,
+      env,
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
     });
@@ -69,22 +72,51 @@ export interface CheckpointResult {
   error?: string;
 }
 
+async function worktreeTree(projectPath: string, base: string): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), 'agentdesk-index-'));
+  const index = join(dir, 'index');
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    await checkedGit(projectPath, ['read-tree', base], env);
+    await checkedGit(projectPath, ['add', '-A'], env);
+    return await checkedGit(projectPath, ['write-tree'], env);
+  } finally {
+    try { unlinkSync(index); } catch { /* 文件可能还未创建 */ }
+    try { rmdirSync(dir); } catch { /* 保留尚有锁的临时目录 */ }
+  }
+}
+
+async function checkedGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
+  const result = await git(cwd, args, env);
+  if (!result.ok) throw new Error(`git ${args[0]} 失败: ${result.stderr.trim().slice(0, 200)}`);
+  return result.stdout.trim();
+}
+
 /**
- * 任务前 checkpoint：把当前工作树（含用户未提交 WIP）钉成回滚锚点。
- * 在宿主执行 → LFS/filemode 配置天然生效，是用户 git 环境的一部分。
+ * 用临时索引和独立引用记录工作树快照，保留当前分支和真实暂存区。
  */
 export async function hostCheckpoint(projectPath: string, taskId: number): Promise<CheckpointResult> {
   if (!isGitRepo(projectPath)) return { ok: true, anchor: 'NO-GIT' };
-  // 幂等：先 add+commit（无改动时 commit 会失败，属正常），再取 HEAD
-  const add = await git(projectPath, ['add', '-A']);
-  if (!add.ok) return { ok: false, anchor: '', error: `git add 失败: ${add.stderr.slice(0, 150)}` };
-  await git(projectPath, [
-    'commit', '-qm', `agentdesk: pre-task checkpoint (task-${taskId})`,
-    '--no-verify',
-  ]);
+  const failure = (error: string): CheckpointResult => ({ ok: false, anchor: '', error });
+  const gitDir = await git(projectPath, ['rev-parse', '--absolute-git-dir']);
+  if (!gitDir.ok) return failure(gitDir.stderr);
+  for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
+    if (existsSync(join(gitDir.stdout.trim(), marker))) return failure(`Git 操作进行中（${marker}）`);
+  }
   const head = await git(projectPath, ['rev-parse', 'HEAD']);
-  if (!head.ok) return { ok: false, anchor: '', error: `git rev-parse 失败: ${head.stderr.slice(0, 150)}` };
-  return { ok: true, anchor: head.stdout.trim() };
+  if (!head.ok) return failure(`无法确定当前 HEAD: ${head.stderr.slice(0, 150)}`);
+  const anchor = head.stdout.trim();
+  const exec = (...args: string[]) => checkedGit(projectPath, args);
+  try {
+    const tree = await worktreeTree(projectPath, anchor);
+    if (await exec('rev-parse', 'HEAD') !== anchor) return failure('创建快照期间 HEAD 已变化');
+    if (tree === await exec('rev-parse', `${anchor}^{tree}`)) return { ok: true, anchor };
+    const commit = await exec('commit-tree', tree, '-p', anchor, '-m', `agentdesk: pre-task checkpoint (task-${taskId})`);
+    await exec('update-ref', `refs/agentdesk/checkpoints/task-${taskId}/${randomUUID()}`, commit);
+    return { ok: true, anchor: commit };
+  } catch (error) {
+    return failure((error as Error).message);
+  }
 }
 
 export interface AuditResult {
@@ -95,10 +127,11 @@ export interface AuditResult {
 /** 任务后审计：相对 checkpoint 的改动清单与统计（宿主侧执行） */
 export async function hostAudit(projectPath: string, anchor: string): Promise<AuditResult> {
   if (!isGitRepo(projectPath) || !anchor || anchor === 'NO-GIT') return { filesChanged: [], diffStat: '' };
-  const st = await git(projectPath, ['status', '--porcelain']);
-  const df = await git(projectPath, ['diff', '--stat', `${anchor}..HEAD`]);
+  const tree = await worktreeTree(projectPath, 'HEAD');
+  const st = await checkedGit(projectPath, ['diff', '--name-status', anchor, tree, '--']);
+  const df = await checkedGit(projectPath, ['diff', '--stat', anchor, tree, '--']);
   return {
-    filesChanged: st.stdout.split('\n').map(s => s.trim()).filter(Boolean),
-    diffStat: df.stdout.trim(),
+    filesChanged: st.split('\n').filter(Boolean),
+    diffStat: df,
   };
 }
