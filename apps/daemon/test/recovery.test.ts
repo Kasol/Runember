@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
+import { getAdapter } from '@agentdesk/adapters';
 import { classifyRun } from '@agentdesk/core';
 import { parse } from 'smol-toml';
 import { loadConfig } from '../src/config.js';
@@ -61,11 +62,44 @@ test('resolves the log directory independently from the data directory', t => {
   assert.equal(loadConfig({ configPath, dataDir, logDir: 'override' }).logDir, join(dataDir, 'override'));
 });
 
-test('blocks a zero-exit ordinary run without an agent result', () => {
-  assert.deepEqual(classifyRun({ exitCode: 0, lastAgentText: 'finished', killed: false, errTail: '' }),
-    { status: 'blocked', blockedKind: 'missing_result' });
-  assert.equal(classifyRun({ exitCode: 0, lastAgentText: '###AGENTCTL_RESULT### {"done":true}', killed: false, errTail: '' }).status,
-    'succeeded');
+test('accepts ordinary Codex replies and distinguishes missing replies and old blocked markers', () => {
+  const exit = { exitCode: 0, killed: false, errTail: '' };
+  assert.deepEqual(classifyRun({ ...exit, lastAgentText: 'finished' }), { status: 'succeeded' });
+  assert.deepEqual(classifyRun({ ...exit, lastAgentText: '  ' }), { status: 'blocked', blockedKind: 'missing_result' });
+  assert.deepEqual(classifyRun({ ...exit, lastAgentText: '###AGENTCTL_BLOCKED### {"question":"Review?"}' }),
+    { status: 'blocked', blockedKind: 'approval_needed' });
+  assert.deepEqual(classifyRun({ ...exit, lastAgentText: '###AGENTCTL_RESULT### {"done":false}' }), { status: 'succeeded' });
+});
+
+test('blocks a normal exit when the final reply explicitly reports an acceptance failure that paused work', () => {
+  const exit = { exitCode: 0, killed: false, errTail: '' };
+  const reasons = [
+    ['已解决冲突并完成 rebase。\n\n**合并因全量测试未通过而暂停。** 最终候选有 146 项失败。', '合并因全量测试未通过而暂停'],
+    ['- 验收未通过，因此无法继续发布。', '验收未通过，因此无法继续发布'],
+    ['Merge is blocked because the required tests failed.', 'Merge is blocked because the required tests failed'],
+  ];
+  for (const [lastAgentText, reason] of reasons) {
+    assert.deepEqual(classifyRun({ ...exit, lastAgentText }), { status: 'blocked', blockedKind: 'verification_failed', reason });
+  }
+  for (const lastAgentText of [
+    '测试失败，已查明原因并提交诊断报告。',
+    '合并因全量测试未通过而暂停过，修复后已通过并合并。',
+    '报告格式示例\n\n```text\n合并因测试未通过而暂停。\n```',
+    '> 合并因测试未通过而暂停。\n\n这是上一轮的记录，本轮已通过测试并完成合并。',
+  ]) {
+    assert.deepEqual(classifyRun({ ...exit, lastAgentText }), { status: 'succeeded' });
+  }
+});
+
+test('passes task and resume text unchanged to Codex in both execution modes', () => {
+  const adapter = getAdapter('codex', 'test-image', 'test-volume');
+  const feedback = '--help\n按项目 skill 执行提交';
+  assert.deepEqual(adapter.buildArgs('workspace-write', 'capability'),
+    ['codex', 'exec', '--json', '--sandbox', 'danger-full-access', '--', 'workspace-write']);
+  assert.deepEqual(adapter.buildArgs(feedback, 'isolation'),
+    ['codex', 'exec', '--json', '--sandbox', 'workspace-write', '--', feedback]);
+  assert.deepEqual(adapter.buildResumeArgs('test-session', feedback, 'capability'),
+    ['codex', 'exec', '--sandbox', 'danger-full-access', 'resume', 'test-session', '--json', '--', feedback]);
 });
 
 test('builds independent MCP config overlays and preserves the other Codex settings', () => {

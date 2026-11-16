@@ -70,6 +70,19 @@ export interface CheckpointResult {
   /** checkpoint 提交的 commit hash（用于任务后 diff 审计）；NO-GIT 表示非仓库 */
   anchor: string;
   error?: string;
+  gitOperation?: string;
+}
+
+function activeOperationIn(gitDir: string): string | undefined {
+  return ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'sequencer']
+    .find(marker => existsSync(join(gitDir, marker)));
+}
+
+/** 检查任务结束后，当前工作树是否还留有正在进行的 Git 操作。 */
+export async function hostGitOperation(projectPath: string): Promise<string | undefined> {
+  if (!isGitRepo(projectPath)) return undefined;
+  const gitDir = await git(projectPath, ['rev-parse', '--absolute-git-dir']);
+  return gitDir.ok ? activeOperationIn(gitDir.stdout.trim()) : undefined;
 }
 
 async function worktreeTree(projectPath: string, base: string): Promise<string> {
@@ -100,9 +113,8 @@ export async function hostCheckpoint(projectPath: string, taskId: number): Promi
   const failure = (error: string): CheckpointResult => ({ ok: false, anchor: '', error });
   const gitDir = await git(projectPath, ['rev-parse', '--absolute-git-dir']);
   if (!gitDir.ok) return failure(gitDir.stderr);
-  for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
-    if (existsSync(join(gitDir.stdout.trim(), marker))) return failure(`Git 操作进行中（${marker}）`);
-  }
+  const gitOperation = activeOperationIn(gitDir.stdout.trim());
+  if (gitOperation) return { ...failure(`Git 操作进行中（${gitOperation}）`), gitOperation };
   const head = await git(projectPath, ['rev-parse', 'HEAD']);
   if (!head.ok) return failure(`无法确定当前 HEAD: ${head.stderr.slice(0, 150)}`);
   const anchor = head.stdout.trim();

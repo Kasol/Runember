@@ -18,16 +18,17 @@ export function buildEventMarkdown(
     : `${LINE}> 提示：配置 server.publicUrl 后可从这里直达看板详情`;
 
   if (e.kind === 'run.blocked') {
+    const gitPaused = e.blockedKind === 'git_in_progress';
     return {
       title: '⚠️ agentdesk 任务阻塞',
       text: [
-        '### ⚠️ 任务阻塞 · 需要你的决定',
+        gitPaused ? '### ⚠️ 任务暂停 · Git 操作待继续' : '### ⚠️ 任务阻塞 · 需要你的决定',
         LINE + `**${t}** \`${e.blockedKind}\``,
         HR,
         e.question ? `**❓ ${e.question}**` : '（详见任务日志）',
         HR,
         e.retryViaCli ? `处理后在宿主机运行 \`npm run desk -- retry ${e.task.id}\`。`
-          : `在群里 @机器人并回复 \`继续 ${e.task.id} 你的决定\`。`,
+          : `在群里 @机器人并回复 \`继续 ${e.task.id} 你的决定\`。${gitPaused ? ` 查看详情用 \`状态 ${e.task.id}\`。` : ''}`,
         detailLink,
       ].join(''),
     };
@@ -51,9 +52,9 @@ export function buildEventMarkdown(
     const partial = s.partial === true;
     const summary = s.agentMessage && stripAgentctlLines(s.agentMessage);
     return {
-      title: partial ? '⚠️ agentdesk 任务部分完成' : '✅ agentdesk 任务完成',
+      title: partial ? '🟡 agentdesk 任务部分完成' : '✅ agentdesk 任务完成',
       text: [
-        partial ? '### ⚠️ 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
+        partial ? '### 🟡 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
         t,
         '---',
         summary ? `**📝 agent 总结**\n\n${summary}` : '',

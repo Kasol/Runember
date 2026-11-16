@@ -5,10 +5,12 @@ import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 
 const STATUS: Record<TaskStatus, string> = {
-  draft: '草稿', queued: '排队', running: '运行中', blocked: '阻塞',
-  done: '完成', failed: '失败', cancelled: '已取消',
+  draft: '📝 草稿', queued: '⏳ 排队', running: '▶️ 运行中', blocked: '⚠️ 阻塞',
+  done: '✅ 已完成', failed: '❌ 失败', cancelled: '🚫 已取消',
 };
-const taskStatus = (task: Task) => task.status === 'done' && task.partial_remaining ? '部分完成' : STATUS[task.status];
+const taskStatus = (task: Task) => task.status === 'done' && task.partial_remaining ? '🟡 部分完成' : STATUS[task.status];
+const canResume = (task: Task, store: Store) => task.status === 'blocked' ||
+  (task.status === 'done' && !!(task.partial_remaining || store.lastSessionOfTask(task.id)));
 
 const HELP = [
   '### 🤖 agentdesk 指令',
@@ -17,7 +19,7 @@ const HELP = [
   '- `执行 [项目] <描述>` / `run [项目] <描述>` · 派发新任务',
   '- `草稿 [项目] <描述>` / `draft [项目] <描述>` · 保存草稿',
   '- `执行 55` / `run 55` · 启动草稿',
-  '- `继续 55 [说明]` / `resume 55 [说明]` · 续跑阻塞或部分完成的任务',
+  '- `继续 55 [说明]` / `resume 55 [说明]` · 继续阻塞任务或已有会话',
   '- `重试 55` / `retry 55` · 失败后重新执行',
   '- `取消 55` / `cancel 55` · 取消草稿、排队或阻塞任务',
   '- `帮助` / `help` · 显示指令',
@@ -56,7 +58,7 @@ export async function applyTaskAction(
       const recent = store.listTasks().slice(0, 6);
       return reply([
         '### 📋 队列状态',
-        `排队 ${queued.length} · 运行中 ${running.length} · 阻塞 ${blocked.length}`,
+        `${STATUS.queued} ${queued.length} · ${STATUS.running} ${running.length} · ${STATUS.blocked} ${blocked.length}`,
         blocked.length ? '待处理 ' + blocked.map(t => `#${t.id}（${projectName(t.project_id)}）`).join('、') : '',
         recent.length ? [
           '**近期任务**',
@@ -78,12 +80,12 @@ export async function applyTaskAction(
     const reason = task.status === 'blocked' || task.status === 'failed' ? run?.blocked_kind : undefined;
     return reply([
       `### 📋 任务 #${id} · ${projectName(task.project_id)}`,
-      `**${taskStatus(task)}**${reason ? ` · ${reason}` : ''}`,
+      `**${taskStatus(task)}**${reason ? ` · ${reason === 'verification_failed' ? '测试或验收未通过' : reason}` : ''}`,
       `**任务描述**\n\n${task.prompt}`,
       result ? `**最近一次运行**\n\n${result}` : '',
       task.partial_remaining ? `**未完成事项**\n\n${task.partial_remaining}` : '',
       merge?.state.repo && merge.state.pr ? `[查看 PR](https://github.com/${merge.state.repo}/pull/${merge.state.pr})` : '',
-      !merge && (task.status === 'blocked' || (task.status === 'done' && task.partial_remaining)) ? `续跑 \`继续 ${id}\`` : '',
+      !merge && canResume(task, store) ? `续跑 \`继续 ${id} [说明]\`` : '',
     ].filter(Boolean).join('\n\n'));
   }
 
@@ -105,7 +107,7 @@ export async function applyTaskAction(
     const task = store.addTask(project.id, prompt, { draft });
     if (!draft) scheduler.tickNow();
     return reply([
-      `### ${draft ? '📝 草稿已创建' : '📋 任务已入队'}`,
+      `### ${draft ? '📝 草稿已创建' : '⏳ 任务已入队'}`,
       `**#${task.id}** · ${project.name}`,
       prompt,
       draft ? `启动草稿 \`执行 ${task.id}\`` : `查看状态 \`状态 ${task.id}\``,
@@ -118,7 +120,7 @@ export async function applyTaskAction(
   const task = store.getTask(id);
   if (!task) return fail(`任务 #${id} 不存在。`);
   const merge = store.getMerge(id);
-  const resumable = task.status === 'blocked' || (task.status === 'done' && !!task.partial_remaining);
+  const resumable = canResume(task, store);
   const title = `**#${id} · ${projectName(task.project_id)}**`;
 
   switch (action.type) {
@@ -132,7 +134,7 @@ export async function applyTaskAction(
       if (extra && extra !== task.prompt) store.updateTaskPrompt(id, task.prompt + '\n' + extra);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return reply(`草稿 ${title} 已入队。查看 \`状态 ${id}\`。`);
+      return reply(`⏳ 草稿 ${title} 已入队。查看 \`状态 ${id}\`。`);
     }
     case 'resume': {
       if (merge) return fail('自动化合并任务请通过 CLI retry 继续。');
@@ -141,7 +143,7 @@ export async function applyTaskAction(
       store.setPendingFeedback(id, feedback);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return reply(`任务 ${title} 已安排继续。\n\n${feedback}`);
+      return reply(`⏳ 任务 ${title} 已安排继续。\n\n${feedback}`);
     }
     case 'retry': {
       if (merge && origin === 'dingtalk') return fail('自动化合并任务请通过 CLI retry 继续。');
@@ -153,7 +155,7 @@ export async function applyTaskAction(
       if (merge) store.deferMerge(id, 0);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return reply(`任务 ${title} 已重新入队。${merge ? '将核对并继续已有合并进度。' : '将从原指令重新执行。'}`);
+      return reply(`⏳ 任务 ${title} 已重新入队。${merge ? '将核对并继续已有合并进度。' : '将从原指令重新执行。'}`);
     }
     case 'cancel': {
       if (merge && origin === 'dingtalk') return fail('自动化合并任务请通过 CLI cancel 取消。');
@@ -162,7 +164,7 @@ export async function applyTaskAction(
         return fail(`任务 #${id} 当前为${STATUS[task.status]}，无法取消。`);
       }
       store.setTaskStatus(id, 'cancelled');
-      return reply(`任务 ${title} 已取消。`);
+      return reply(`🚫 任务 ${title} 已取消。`);
     }
     default:
       return fail('无法识别该任务动作，发送 `帮助` 查看指令。');

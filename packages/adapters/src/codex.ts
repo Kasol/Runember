@@ -3,7 +3,7 @@
  *   thread.started (thread_id) / turn.started / item.started / item.completed
  *   item 子类型：agent_message / command_execution / file_change / turn.completed
  */
-import { AgentAdapter, AdapterEvent, AGENTCTL_CONTRACT } from '@agentdesk/core';
+import type { AgentAdapter, AdapterEvent, ExecutionMode } from '@agentdesk/core';
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
@@ -14,12 +14,14 @@ export class CodexAdapter implements AgentAdapter {
     public homeVolume: string,
   ) {}
 
-  buildArgs(prompt: string): string[] {
-    return ['codex', 'exec', '--json', '--sandbox', 'workspace-write', prompt + AGENTCTL_CONTRACT];
+  buildArgs(prompt: string, execution?: ExecutionMode): string[] {
+    const sandbox = execution === 'capability' ? 'danger-full-access' : 'workspace-write';
+    return ['codex', 'exec', '--json', '--sandbox', sandbox, '--', prompt];
   }
 
-  buildResumeArgs(sessionId: string, feedback: string): string[] {
-    return ['codex', 'exec', 'resume', sessionId, '--json', '--sandbox', 'workspace-write', feedback + AGENTCTL_CONTRACT];
+  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode): string[] {
+    const sandbox = execution === 'capability' ? 'danger-full-access' : 'workspace-write';
+    return ['codex', 'exec', '--sandbox', sandbox, 'resume', sessionId, '--json', '--', feedback];
   }
 
   authCheckArgs(): string[] {

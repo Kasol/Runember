@@ -39,7 +39,7 @@ test('DingTalk actions separate draft execution, resume, retry and queries', asy
   assert.equal(store.getTask(finished.id)?.prompt, '已完成任务');
   assert.equal((await dispatch(`重试 ${finished.id}`)).ok, false);
   const detail = await dispatch(`状态 ${finished.id}`);
-  for (const content of ['完整的测试总结', '部分完成', '还有这件事']) assert.ok(detail.message.includes(content));
+  for (const content of ['完整的测试总结', '**🟡 部分完成**', '还有这件事']) assert.ok(detail.message.includes(content));
   assert.equal((await dispatch(`${finished.id} 继续`)).ok, true);
   assert.equal(store.getTask(finished.id)?.pending_feedback, '请继续完成剩余部分');
 
@@ -47,12 +47,28 @@ test('DingTalk actions separate draft execution, resume, retry and queries', asy
   const draft = store.listDrafts()[0]!;
   assert.equal(draft.prompt, '55行以内写个示例');
   assert.equal((await dispatch(`执行 ${draft.id}`)).ok, true);
-  assert.match((await dispatch('状态')).message, /排队 2/);
-  assert.equal((await dispatch(`${draft.id} 取消`)).ok, true);
+  assert.match((await dispatch('状态')).message, /⏳ 排队 2/);
+  assert.match((await dispatch(`${draft.id} 取消`)).message, /^🚫/);
   assert.equal(store.getTask(draft.id)?.status, 'cancelled');
+  assert.match((await dispatch(`状态 ${draft.id}`)).message, /\*\*🚫 已取消\*\*/);
 
   const failed = store.addTask(project.id, '失败的任务');
   store.setTaskStatus(failed.id, 'failed');
   assert.equal((await dispatch(`retry ${failed.id}`)).ok, true);
   assert.equal(store.getTask(failed.id)?.status, 'queued');
+
+  const olderPause = store.addTask(project.id, '旧版记为完成的 Git 冲突草案');
+  const oldRun = store.beginRun(olderPause.id)!;
+  store.finishRun(oldRun.id, { status: 'succeeded', session_id: 'old-codex-session' }, 'done');
+  assert.match((await dispatch(`状态 ${olderPause.id}`)).message, /\*\*✅ 已完成\*\*/);
+  assert.equal((await dispatch(`继续 ${olderPause.id} 确认按草案继续`)).ok, true);
+  assert.equal(store.getTask(olderPause.id)?.pending_feedback, '确认按草案继续');
+  assert.equal(store.lastSessionOfTask(olderPause.id), 'old-codex-session');
+
+  const blocked = store.addTask(project.id, '等待处理冲突');
+  store.setTaskStatus(blocked.id, 'blocked');
+  assert.match((await dispatch(`状态 ${blocked.id}`)).message, /\*\*⚠️ 阻塞\*\*/);
+  const queue = (await dispatch('状态')).message;
+  assert.match(queue, new RegExp(`#${blocked.id}\\*\\* selftest · ⚠️ 阻塞`));
+  assert.match(queue, new RegExp(`#${draft.id}\\*\\* selftest · 🚫 已取消`));
 });

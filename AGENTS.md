@@ -44,7 +44,7 @@ npm run typecheck                                # tsc --noEmit（提交前必�
 
 ### Codex 沙箱（重要）
 - codex Windows 沙箱把命令降权到 `CodexSandboxUsers` 受限账户；web-cad 等仓库的 `.git` 有对该账户的显式拒绝写 ACL → agent 的 fetch/commit/push 会失败
-- **capability 模式已解法**：runner 把 `--sandbox workspace-write` 升级为 `danger-full-access`（命令以用户完整身份跑）。不要"顺手"改回去
+- **capability 模式已解法**：CodexAdapter 按执行模式设置 `--sandbox danger-full-access`（命令以用户完整身份跑）。隔离模式使用 `workspace-write`。
 - isolation 模式容器内必须 `seccomp=unconfined`（codex 的 bwrap 沙箱需要 userns），否则 agent 命令全部静默失败
 - 宿主进程必须显式关闭 stdin（`OpenStdin:false` / stdio ignore），否则 codex 完成后等 stdin 挂起，状态滞后
 
@@ -60,10 +60,10 @@ npm run typecheck                                # tsc --noEmit（提交前必�
 - 去重优先用机器人消息体的 `msgId`，缺失时用回调头的 `messageId`。**禁止内容级去重**，用户可以重新发送相同指令。
 - `~/.codex/config.toml` 的 MCP 配置（如 GUI 的 node_repl）在 CLI 会话里可能依赖 GUI 会话变量而不可用；第三方标准 MCP（url/command 型）原生可用
 
-### 结果协议（任务收尾契约）
-- agent 结束前必须输出 `###AGENTCTL_RESULT### {"done":bool,"summary":...,"remaining":...}`
-- `done:false` → 任务标记部分完成（partial_remaining 落库），三端可见 + 一键后续任务
-- 续跑阻塞或部分完成任务：`继续 <编号> [说明]` 或 `resume <编号> [说明]`，编号可带 `#`。
+### 任务指令和结果
+- Codex 接收用户的任务指令或续跑反馈。提交、推送和验收按适用的 skill 与用户指令执行。
+- Codex 正常退出并返回答复时记录任务运行结果。答复明确报告因测试或验收失败而暂停流程，或宿主工作树上还有未结束的 Git 操作时，任务标为阻塞。旧会话的 `###AGENTCTL_RESULT###`（包括部分完成）和 `###AGENTCTL_BLOCKED###` 标记仍可解析。
+- 用 `继续 <编号> [说明]` 或 `resume <编号> [说明]` 续跑，编号可带 `#`。用户明确续跑时，能力优先任务可以接着处理当前工作树上的 Git 操作。
 - 展示 agent 总结时用 `stripAgentctlLines()` 剥离协议标记行，别让协议原文漏给用户
 
 ### 进程管理

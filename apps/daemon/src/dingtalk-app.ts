@@ -23,7 +23,6 @@ export class DingTalkAppNotifier extends DedupedNotifier {
   }
 
   async sendRaw(title: string, text: string): Promise<void> {
-    if (!this.destination.conversationId) throw new Error('钉钉主动通知缺少 conversationId');
     await this.post(title, text);
   }
 
@@ -42,10 +41,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
 
   private async post(title: string, markdown: string): Promise<void> {
     const { conversationId, robotCode } = this.destination;
-    if (!conversationId) {
-      console.warn('[notify:dingtalk-app] 未配置 conversationId，本次跳过');
-      return;
-    }
+    if (!conversationId) throw new Error('钉钉主动通知缺少 conversationId');
     const token = await this.getToken();
     const res = await fetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
       method: 'POST',
@@ -64,6 +60,9 @@ export class DingTalkAppNotifier extends DedupedNotifier {
   protected async send(e: NotifyEvent): Promise<void> {
     if (!this.events.includes(e.kind.replace('run.', ''))) return;
     const md = buildEventMarkdown(e, this.publicUrl);
-    if (md) await this.post(md.title, md.text);
+    if (md) {
+      await this.post(md.title, md.text);
+      console.log(`[notify:dingtalk-app] 钉钉已接受通知 task=${e.task.id} run=${e.runId} event=${e.kind}`);
+    }
   }
 }

@@ -31,7 +31,9 @@ export type BlockedKind =
   | 'external_write'     // 任务期间检测到外部修改（host-dir 模式的竞态防护，预留）
   | 'timeout'            // 超时被看门狗击杀
   | 'interrupted'        // daemon 中断，无法确认已完成
-  | 'missing_result'     // CLI 正常退出，但任务结果未报告
+  | 'git_in_progress'    // 当前工作树有尚未结束的 Git 操作
+  | 'verification_failed' // 答复明确报告验收失败，流程暂停
+  | 'missing_result'     // CLI 正常退出，但没有返回任务答复
   | 'unknown_error';
 
 /**
@@ -129,30 +131,10 @@ export function stripAgentctlLines(text: string): string {
 
 // ─────────────────────────── 阻塞协议 ───────────────────────────
 
-/** agent 主动声明"需要人"的约定标记（注入到任务 prompt 的契约里） */
+/** 兼容旧会话中 agent 主动声明需要人工决策的标记 */
 export const AGENTCTL_MARKER = '###AGENTCTL_BLOCKED###';
-/** agent 收尾时报告结果的结构化标记（区分"全部完成"与"部分完成"） */
+/** 兼容旧会话中 agent 的结构化结果标记 */
 export const AGENTCTL_RESULT_MARKER = '###AGENTCTL_RESULT###';
-
-/** 注入给 agent 的阻塞契约（由 adapter 拼进 prompt 尾部） */
-export const AGENTCTL_CONTRACT = [
-  '',
-  '---',
-  '[运行平台约定]',
-  '1. 如果你在无法获得人类输入的情况下无法继续（缺凭据/需要产品决策/需要确认破坏性操作），',
-  `请立即停止并输出一行以 ${AGENTCTL_MARKER} 开头的 JSON，形如：`,
-  `${AGENTCTL_MARKER} {"reason":"...","question":"..."}，然后结束。不要猜测，不要空转。`,
-  '2. 【环境规则】系统级依赖无法安装（沙箱只允许写工作区）。npm/pip 安装到项目本地目录是允许的；',
-  '系统级缺失（apt/全局包/系统库/外部服务）时：不要反复重试安装，输出阻塞标记，',
-  '并在 question 里精确列出缺失项与宿主侧安装方式（如 "apt-get install resvg" 或 "需预装 X"），一次问清。',
-  '3. 平台未配置的外部工具（MCP/浏览器调试等）不存在，不要请求启用它们；',
-  '若有合理的降级方案（如跳过某类验收），在 question 里给出明确的降级选项供人选择。',
-  `4. 【结果报告】结束前，必须输出一行以 ${AGENTCTL_RESULT_MARKER} 开头的 JSON：`,
-  `全部完成 → ${AGENTCTL_RESULT_MARKER} {"done":true,"summary":"一句话结果"}`,
-  `部分完成/中途停止 → ${AGENTCTL_RESULT_MARKER} {"done":false,"summary":"已完成什么","remaining":"明确列出未完成的部分"}`,
-  '"部分完成"不会被当作完整成功，人类会依据 remaining 决定后续（如派发后续任务）。',
-  '5. 其余情况正常完成任务即可。不要执行 git push。',
-].join('\n');
 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────
 
@@ -166,17 +148,42 @@ export interface ClassifyInput {
 export interface ClassifyResult {
   status: 'succeeded' | 'failed' | 'blocked';
   blockedKind?: BlockedKind;
+  reason?: string;
 }
 
-/** Run 终态判定：协议标记 > 超时 > 错误指纹 > 成败 */
+const workflow = '(?:(?:当前|本次|本轮)\\s*)?(?:自动化)?(?:合并|提交|交付|发布|部署|任务|流程)';
+const failedCheck = '(?:全量|单元|集成)?(?:测试|验证|验收|检查|npm test)\\s*(?:未通过|没有通过|没过|失败|超时)';
+const paused = '(?:暂停|暂缓|阻塞|无法继续|不能继续)';
+const verificationBlockStatements = [
+  new RegExp(`^${workflow}\\s*(?:因(?:为)?|由于)\\s*${failedCheck}\\s*(?:而|因此|所以)?\\s*${paused}(?=[。.!！]|$)`),
+  new RegExp(`^(?:(?:因(?:为)?|由于)\\s*)?${failedCheck}[，,；;]\\s*(?:因此|所以)?\\s*(?:${workflow}\\s*(?:已|被|仍)?${paused}|(?:无法|不能)继续${workflow})(?=[。.!！]|$)`),
+  /^(?:the\s+)?(?:merge|release|deployment|workflow|task)\s+(?:(?:is|has been)\s+)?(?:paused|blocked|stopped|on hold)\s+(?:because|due to)\s+(?:(?:the|full|automated|required)\s+)*(?:tests?|checks?|verification)\s+(?:failed|did not pass|timed out)(?=[.!]|$)/i,
+];
+
+/** 只接受答复中明确说明流程因验收失败而暂停的状态句。 */
+function reportedVerificationBlock(text: string): string | undefined {
+  const answer = text.replace(/^\s*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s*\1[ \t]*\r?$/gm, '');
+  for (const line of answer.split('\n')) {
+    const statement = line.trim().replace(/^(?:#{1,6}|[-*+] |\d+\.)\s*/, '').replace(/[*`]/g, '').trim();
+    for (const pattern of verificationBlockStatements) {
+      const match = statement.match(pattern);
+      if (match) return match[0];
+    }
+  }
+}
+
+/** Run 终态由超时、人工阻塞、退出码和答复决定。 */
 export function classifyRun(input: ClassifyInput): ClassifyResult {
   if (input.killed) return { status: 'blocked', blockedKind: 'timeout' };
   if (input.lastAgentText.includes(AGENTCTL_MARKER)) {
     return { status: 'blocked', blockedKind: 'approval_needed' };
   }
-  if (input.exitCode === 0) return parseResultMarker(input.lastAgentText)
-    ? { status: 'succeeded' }
-    : { status: 'blocked', blockedKind: 'missing_result' };
+  if (input.exitCode === 0) {
+    if (!input.lastAgentText.trim()) return { status: 'blocked', blockedKind: 'missing_result' };
+    const reason = reportedVerificationBlock(input.lastAgentText);
+    if (reason) return { status: 'blocked', blockedKind: 'verification_failed', reason };
+    return { status: 'succeeded' };
+  }
   const t = (input.errTail + '\n' + input.lastAgentText).toLowerCase();
   if (/401|unauthorized|not logged in|未登录|invalid api key/.test(t)) {
     return { status: 'blocked', blockedKind: 'auth_missing' };
@@ -229,10 +236,10 @@ export interface AgentAdapter {
   image: string;
   /** codex-home 卷名（凭证 + 会话，resume 的命脉） */
   homeVolume: string;
-  /** 正常任务的容器命令 */
-  buildArgs(prompt: string): string[];
-  /** 续跑命令：带完整上下文恢复会话并注入人的反馈 */
-  buildResumeArgs(sessionId: string, feedback: string): string[];
+  /** 正常任务的命令 */
+  buildArgs(prompt: string, execution?: ExecutionMode): string[];
+  /** 续跑命令：恢复会话并传递用户反馈 */
+  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode): string[];
   /** 单行事件解析：返回 null 表示该行不是关心的 JSONL 事件 */
   parseLine(line: string): AdapterEvent | null;
   /** 启动前凭证自检命令（如 test -f auth.json），exit 0 为通过 */
@@ -246,11 +253,11 @@ export interface AdapterEvent {
 }
 
 /** 通知器：daemon 只发领域事件，实现方决定发到哪（Console/钉钉/企微/邮件…） */
-export type NotifyEvent =
+export type NotifyEvent = { runId: number } & (
   | { kind: 'run.started'; task: Task; project: Project }
   | { kind: 'run.succeeded'; task: Task; project: Project; summary: RunSummary }
   | { kind: 'run.failed'; task: Task; project: Project; reason: string; retryViaCli?: boolean }
-  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string; retryViaCli?: boolean };
+  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string; retryViaCli?: boolean });
 
 export interface Notifier {
   readonly name: string;

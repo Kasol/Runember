@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER, parseResultMarker, stripAgentctlLines } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
-import { hostCheckpoint, hostAudit } from './hostgit.js';
+import { hostCheckpoint, hostAudit, hostGitOperation } from './hostgit.js';
 import { MergeBlocked, runMerge } from './merge.js';
 import { prepareMcpConfig } from './mcp.js';
 import { findHostCodex, hostCodexLoginStatus, hostCodexProxyEnv, runNative } from './native.js';
@@ -228,7 +228,7 @@ export class Runner {
         { agentMessage: `无法创建任务日志 ${logPath}：${(error as Error).message}`, filesChanged: [], diffStat: '' });
     }
     store.updateRun(run.id, { status: 'running', started_at: new Date().toISOString(), log_path: logPath });
-    events.emit({ kind: 'run.started', task, project });
+    events.emit({ kind: 'run.started', runId: run.id, task, project });
 
     let logWriteFailed = false;
     const record = (message: string) => {
@@ -277,7 +277,8 @@ export class Runner {
     let effectiveImage: string = adapter.image;
     // capability 模式：codex 直接跑宿主——auth/skills/MCP 全部原生（宿主 ~/.codex），
     // 跳过播种/渲染/预装/凭证容器检查（那些是隔离模式的容器环境准备工作）。
-    const isCapability = (project.execution ?? 'capability') === 'capability';
+    const execution = project.execution ?? 'capability';
+    const isCapability = execution === 'capability';
     let cleanupConfig: (() => void) | undefined;
 
     try {
@@ -326,24 +327,25 @@ export class Runner {
 
       // ② checkpoint：宿主侧执行（继承用户 LFS/filemode 配置，容器不再触碰 .git）
       const cp = await hostCheckpoint(project.workspace_path, task.id);
-      if (!cp.ok) {
-        return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'unknown_error' },
+      const continuingGit = !!cp.gitOperation && isCapability && kind === 'resume';
+      if (!cp.ok && !continuingGit) {
+        return this.finish(task, project, run.id, { status: 'blocked', blockedKind: cp.gitOperation ? 'git_in_progress' : 'unknown_error' },
           { agentMessage: `checkpoint 失败：${cp.error}`, filesChanged: [], diffStat: '' }, logPath, undefined);
       }
-      const anchor = cp.anchor;
-      if (anchor !== 'NO-GIT') {
+      const anchor = cp.ok ? cp.anchor : '';
+      if (continuingGit) {
+        record(`# 用户请求续跑：Git 操作进行中（${cp.gitOperation}），本轮没有可用的快照基线\n`);
+      } else if (anchor && anchor !== 'NO-GIT') {
         store.updateRun(run.id, { checkpoint_sha: anchor });
         record(`# checkpoint=${anchor}\n`);
       }
 
       // ③ 主执行：resume（带反馈+旧会话）或 normal
-      const priorSession = kind === 'resume' ? store.lastSessionOfTask(task.id) : undefined;
-      let cmd = kind === 'resume' && priorSession
-        ? adapter.buildResumeArgs(priorSession, task.pending_feedback!)
-        : adapter.buildArgs(kind === 'resume' ? `${task.prompt}\n\n人工续跑说明：${task.pending_feedback}` : task.prompt);
-      // capability（能力优先）= 信任宿主环境：解除 codex Windows 沙箱降权
-      // （默认命令跑在 CodexSandboxUsers 受限账户，.git 对其显式拒写 → fetch/commit/push 全废）
-      if (isCapability) cmd = cmd.map(a => (a === 'workspace-write' ? 'danger-full-access' : a));
+      const feedback = task.pending_feedback;
+      const priorSession = feedback ? store.lastSessionOfTask(task.id) : undefined;
+      const cmd = priorSession && feedback
+        ? adapter.buildResumeArgs(priorSession, feedback, execution)
+        : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, execution);
 
       let sessionId: string | undefined;
       let lastAgentText = '';
@@ -377,19 +379,16 @@ export class Runner {
           });
       for (const l of main.err) record('[stderr] ' + l + '\n');
 
-      // ④ 收尾审计：宿主侧执行（相对 checkpoint 的改动清单）
-      const audit = await hostAudit(project.workspace_path, anchor);
-      const filesChanged = audit.filesChanged;
-      const diffStat = audit.diffStat;
-
-      // ⑤ 终态判定
-      const result = classifyRun({
+      // ④ 收尾：有未结束的 Git 操作时，留给用户根据草案继续。
+      let result = classifyRun({
         exitCode: main.exitCode,
         killed: main.killed,
         lastAgentText,
         errTail: [...main.err.slice(-20), lastAgentError].join('\n'),
       });
-      // 结果报告（result 标记）：agent 自报部分完成 → 记录 remaining 供人决定后续
+      const pendingGit = isCapability ? await hostGitOperation(project.workspace_path) : undefined;
+      const { filesChanged, diffStat } = await hostAudit(project.workspace_path, pendingGit ? '' : anchor);
+      // 旧会话仍可能报告部分完成，保留未完成项供续跑。
       const report = parseResultMarker(lastAgentText);
       const summary: RunSummary = {
         agentMessage: result.status === 'blocked' ? lastAgentText || undefined
@@ -398,6 +397,12 @@ export class Runner {
         partial: report ? !report.done : undefined,
         remaining: report?.remaining,
       };
+      if (pendingGit && result.status === 'succeeded') {
+        const reason = `Git 操作暂停（${pendingGit}）。请查看任务详情中的处理方案，再确认是否继续。`;
+        record(`# ${reason}\n`);
+        summary.agentMessage = [reason, summary.agentMessage].filter(Boolean).join('\n\n');
+        result = { status: 'blocked', blockedKind: 'git_in_progress' };
+      }
       this.finish(task, project, run.id, result, summary, logPath, main.exitCode);
     } catch (e: any) {
       this.finish(task, project, run.id,
@@ -424,16 +429,17 @@ export class Runner {
     }, taskStatusAfterRun(task, store.getRun(runId)!, result),
     result.status === 'succeeded' && summary.partial ? summary.remaining ?? '（agent 未给出明细）' : null);
 
-    if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', task, project, summary });
+    if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', runId, task, project, summary });
     else if (result.status === 'blocked') {
       // 从协议标记行提取人话问题：###AGENTCTL_BLOCKED### {"question":"..."}
-      let question: string | undefined = retryViaCli ? summary.agentMessage : undefined;
-      if (result.blockedKind === 'missing_result') question = 'Codex 已退出，但没有报告任务结果。请查看日志后决定是否续跑。';
+      let question = result.reason ?? (stripAgentctlLines(summary.agentMessage ?? '') || undefined);
+      if (result.blockedKind === 'git_in_progress') question = question?.split('\n\n', 1)[0];
+      if (result.blockedKind === 'missing_result') question = 'Codex 已退出，但没有返回任务答复。请查看日志后决定是否续跑。';
       const markerLine = summary.agentMessage?.split('\n').find(l => l.includes(AGENTCTL_MARKER));
       if (markerLine) {
         try {
           const j = JSON.parse(markerLine.slice(markerLine.indexOf(AGENTCTL_MARKER) + AGENTCTL_MARKER.length).trim());
-          question = typeof j.question === 'string' ? j.question : typeof j.reason === 'string' ? j.reason : undefined;
+          question = typeof j.question === 'string' ? j.question : typeof j.reason === 'string' ? j.reason : question;
         } catch { question = markerLine.slice(0, 300); }
       }
       // 循环熔断：60 分钟内该任务 blocked ≥3 次 → 不再自动接受 resume 循环，
@@ -445,7 +451,7 @@ export class Runner {
       if (loopCount >= 3) {
         question = `⏸️ 该任务 1 小时内已阻塞 ${loopCount} 次（环境问题循环）。\n\n最新问题：${question ?? '（见日志）'}\n\n建议：先修复环境（缺工具/缺依赖/MCP 未接入）再 resume；或 resume 时明确授权降级方案。`;
       }
-      events.emit({ kind: 'run.blocked', task, project, blockedKind: result.blockedKind!, question, retryViaCli });
-    } else events.emit({ kind: 'run.failed', task, project, reason: summary.agentMessage ?? 'unknown', retryViaCli });
+      events.emit({ kind: 'run.blocked', runId, task, project, blockedKind: result.blockedKind!, question, retryViaCli });
+    } else events.emit({ kind: 'run.failed', runId, task, project, reason: summary.agentMessage ?? 'unknown', retryViaCli });
   }
 }
