@@ -9,15 +9,15 @@
 import Docker from 'dockerode';
 import { Writable } from 'node:stream';
 import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER, parseResultMarker } from '@agentdesk/core';
+import { join, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER, parseResultMarker, stripAgentctlLines } from '@agentdesk/core';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit } from './hostgit.js';
-import { renderMcpToml, writeMcpToVolume } from './mcp.js';
-import { runNative } from './native.js';
-import { findHostCodex } from './native.js';
-import type { Task, Project, RunSummary } from '@agentdesk/core';
+import { MergeBlocked, runMerge } from './merge.js';
+import { prepareMcpConfig } from './mcp.js';
+import { findHostCodex, hostCodexLoginStatus, hostCodexProxyEnv, runNative } from './native.js';
+import type { Task, Project, Run, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
   docker: Docker;
@@ -56,6 +56,8 @@ export class Runner {
   private getSpawnBinds(project: Project, agentHomeVolume: string): string[] {
     return [
       `${toBind(project.workspace_path)}:/workspace`,
+      ...(existsSync(join(project.workspace_path, '.git'))
+        ? [`${toBind(join(project.workspace_path, '.git'))}:/workspace/.git:ro`] : []),
       `${agentHomeVolume}:/codex-home`,
     ];
   }
@@ -64,6 +66,7 @@ export class Runner {
   private async spawn(opts: {
     image: string; cmd: string[]; binds: string[]; env: string[];
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+    onContainer?: (id: string) => void;
   }): Promise<SpawnResult> {
     const { docker } = this.deps;
     const out: string[] = [];
@@ -86,6 +89,7 @@ export class Runner {
         SecurityOpt: ['seccomp=unconfined'], // bwrap 需要 userns（M0 实测）
       },
     });
+    opts.onContainer?.(container.id);
     await container.start();
     const stream = await container.logs({ follow: true, stdout: true, stderr: true });
     docker.modem.demuxStream(
@@ -104,9 +108,11 @@ export class Runner {
 
   private proxyEnv(): string[] {
     const { proxy } = this.deps.cfg;
+    const https = proxy.httpsProxy;
+    const http = proxy.httpProxy;
     const env: string[] = [];
-    if (proxy.httpsProxy) env.push(`HTTPS_PROXY=${proxy.httpsProxy}`, `https_proxy=${proxy.httpsProxy}`);
-    if (proxy.httpProxy) env.push(`HTTP_PROXY=${proxy.httpProxy}`, `http_proxy=${proxy.httpProxy}`);
+    if (https) env.push(`HTTPS_PROXY=${https}`, `https_proxy=${https}`);
+    if (http) env.push(`HTTP_PROXY=${http}`, `http_proxy=${http}`);
     return env;
   }
 
@@ -143,29 +149,33 @@ export class Runner {
 
   /**
    * 项目级依赖预装（依赖三层通道的"项目层"）：
-   * extraPackages 声明的系统包 → 装完 commit 为项目专属镜像（<base>-p<projectId>）。
+   * extraPackages 声明的系统包 → 装完 commit 为以基础镜像和包集合寻址的镜像。
    * 镜像按内容键复用：同名包集合同一镜像，不随 run 数膨胀。
    */
-  private async installPackages(baseImage: string, packages: string[], projectId: number): Promise<string> {
+  private async installPackages(baseImage: string, packages: string[]): Promise<string> {
     const { docker } = this.deps;
-    const key = packages.slice().sort().join(',');
-    const target = `${baseImage.split(':')[0]}:p${projectId}`;
-    // 复用：目标镜像已存在则跳过安装（包集合变化时由调用方传不同 packages，tag 以项目为粒度，
-    // 变更场景：先删旧 tag 再重建——简单可靠，容器销毁型架构下重建成本可接受）
+    if (packages.some(name => typeof name !== 'string' || !/^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?(?:=[\w.+:~-]+)?$/.test(name))) {
+      throw new Error('extraPackages 必须是有效的 Debian 包名，可以包含架构和版本');
+    }
+    const base = await docker.getImage(baseImage).inspect();
+    const sorted = [...new Set(packages)].sort();
+    const key = createHash('sha256').update(JSON.stringify([base.Id, sorted])).digest('hex');
+    const target = `agentdesk/runner-with-deps:${key}`;
     try { await docker.getImage(target).inspect(); return target; } catch { /* 不存在，开始构建 */ }
     const c = await docker.createContainer({
-      Image: baseImage,
-      Cmd: ['sh', '-c', `apt-get update -qq && apt-get install -y -qq --no-install-recommends ${packages.join(' ')} && rm -rf /var/lib/apt/lists/*`],
+      Image: base.Id,
+      Cmd: ['sh', '-c', 'apt-get update -qq && apt-get install -y -qq --no-install-recommends "$@" && rm -rf /var/lib/apt/lists/*',
+        'agentdesk', ...sorted],
       Labels: { 'agentdesk.extra': 'pkgs', 'agentdesk.packages': key },
     });
-    await c.start();
-    const wait = await c.wait();
-    if (wait.StatusCode !== 0) {
-      try { await c.remove({ force: true }); } catch { /* noop */ }
-      throw new Error(`依赖预装失败（exit=${wait.StatusCode}）: ${packages.join(',')}`);
+    try {
+      await c.start();
+      const wait = await c.wait();
+      if (wait.StatusCode !== 0) throw new Error(`依赖预装失败（exit=${wait.StatusCode}）: ${sorted.join(',')}`);
+      await c.commit({ repo: 'agentdesk/runner-with-deps', tag: key });
+    } finally {
+      await c.remove({ force: true }).catch(() => {});
     }
-    await c.commit({ repo: target.split(':')[0], tag: target.split(':')[1] });
-    try { await c.remove(); } catch { /* noop */ }
     console.log(`📦 项目依赖镜像就绪: ${target} (${packages.join(', ')})`);
     return target;
   }
@@ -173,6 +183,7 @@ export class Runner {
   private async runNativePath(opts: {
     adapterImage: string; cmd: string[]; cwd: string; env: string[];
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+    onPid: (pid: number) => void;
   }): Promise<{ exitCode: number; killed: boolean; out: string[]; err: string[] }> {
     // 命令映射：容器内 'codex ...' → 宿主实际发现的 codex 可执行路径
     const hostCodex = findHostCodex();
@@ -181,28 +192,85 @@ export class Runner {
     return runNative({
       cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
       onStdoutLine: opts.onStdoutLine,
-    });
+    }, child => { if (child.pid) opts.onPid(child.pid); });
+  }
+
+  async workerIsAlive(worker: Run['worker']): Promise<boolean> {
+    if (!worker) return false;
+    if (worker.kind === 'native') {
+      try { process.kill(worker.pid, 0); return true; }
+      catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+    }
+    try {
+      const info = await this.deps.docker.getContainer(worker.id).inspect();
+      return info.State.Running || info.State.Restarting;
+    } catch (error) {
+      return (error as { statusCode?: number }).statusCode !== 404;
+    }
   }
 
   async execute(taskId: number): Promise<void> {
     const { cfg, store, events } = this.deps;
     const task = store.getTask(taskId)!;
     const project = store.getProject(task.project_id)!;
-    const adapter = getAdapterId(project.agent_id, cfg);
-    const agentCfg = cfg.agents[project.agent_id]!;
-    const runsDir = join(cfg.dataDir, 'runs');
-    mkdirSync(runsDir, { recursive: true });
-
-    const kind = task.pending_feedback ? 'resume' : 'normal';
-    const run = store.insertRun(task.id, kind);
-    const logPath = join(runsDir, `run-${run.id}.jsonl`);
-    writeFileSync(logPath, `# task=${task.id} kind=${kind} agent=${project.agent_id} project=${project.name}\n`);
+    const run = store.beginRun(task.id);
+    if (!run) return;
+    const kind = run.kind;
+    const runsDir = join(cfg.logDir, 'runs');
+    // 独立数据库可能共用日志目录，run ID 只在当前数据库内唯一。
+    const logPath = join(runsDir, `run-${run.id}-${randomUUID()}.jsonl`);
+    try {
+      mkdirSync(runsDir, { recursive: true });
+      writeFileSync(logPath, `# task=${task.id} kind=${kind} agent=${project.agent_id} project=${project.name}\n`,
+        { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      return this.finish(task, project, run.id, { status: 'failed', blockedKind: 'unknown_error' },
+        { agentMessage: `无法创建任务日志 ${logPath}：${(error as Error).message}`, filesChanged: [], diffStat: '' });
+    }
     store.updateRun(run.id, { status: 'running', started_at: new Date().toISOString(), log_path: logPath });
-    store.setTaskStatus(task.id, 'running');
-    store.setPendingFeedback(task.id, null); // 反馈已被本次 Run 消费
-    store.setTaskPartial(task.id, null);     // 旧的"部分完成"标记随新执行失效
     events.emit({ kind: 'run.started', task, project });
 
+    let logWriteFailed = false;
+    const record = (message: string) => {
+      if (logWriteFailed) return;
+      try { appendFileSync(logPath, message); }
+      catch (error) {
+        logWriteFailed = true;
+        console.error(`无法写入任务日志 ${logPath}`, error);
+      }
+    };
+    const merge = store.getMerge(task.id);
+    if (merge) {
+      try {
+        if (project.execution === 'isolation') throw new MergeBlocked('自动化合并需要 capability 项目');
+        const result = await runMerge({
+          cwd: project.workspace_path,
+          worktree: resolve(cfg.dataDir, 'merge-worktrees', String(task.id)),
+          plan: merge.plan, state: merge.state,
+          save: state => store.saveMerge(task.id, state),
+          log: record, testTimeout: cfg.scheduler.taskTimeoutMin * 60_000,
+          onTestPid: pid => store.updateRun(run.id, { worker: { kind: 'native', pid } }),
+        });
+        record(result.message + '\n');
+        const summary = { agentMessage: result.message, filesChanged: [], diffStat: '' };
+        if (result.status === 'waiting') {
+          store.deferMerge(task.id, Date.now() + 30_000);
+          store.finishRun(run.id, { status: 'succeeded', summary_json: JSON.stringify(summary), ended_at: new Date().toISOString() }, 'queued');
+        } else {
+          this.finish(task, project, run.id, { status: 'succeeded' }, summary, logPath, 0);
+        }
+      } catch (error) {
+        const message = (error as Error).message;
+        record(message + '\n');
+        const result = error instanceof MergeBlocked ? { status: 'blocked', blockedKind: 'approval_needed' } as const
+          : { status: 'failed', blockedKind: 'unknown_error' } as const;
+        this.finish(task, project, run.id, result, { agentMessage: message, filesChanged: [], diffStat: '' }, logPath);
+      }
+      return;
+    }
+
+    const adapter = getAdapterId(project.agent_id, cfg);
+    const agentCfg = cfg.agents[project.agent_id]!;
     const binds = this.getSpawnBinds(project, adapter.homeVolume);
     const env = ['CODEX_HOME=/codex-home', ...this.proxyEnv()];
     const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
@@ -210,16 +278,20 @@ export class Runner {
     // capability 模式：codex 直接跑宿主——auth/skills/MCP 全部原生（宿主 ~/.codex），
     // 跳过播种/渲染/预装/凭证容器检查（那些是隔离模式的容器环境准备工作）。
     const isCapability = (project.execution ?? 'capability') === 'capability';
+    let cleanupConfig: (() => void) | undefined;
 
     try {
       if (!isCapability) {
         // ══ isolation 模式的容器环境准备 ══
         await this.seedSkills(adapter.homeVolume);
+        await this.ensureVolume(adapter.homeVolume);
         const mcp = project.mcpServers;
         if (mcp?.length) {
-          const registry = (cfg.agents[project.agent_id] as any)?.mcp ?? {};
-          const { toml, written, skipped } = renderMcpToml(mcp, registry);
-          await writeMcpToVolume(this.deps.docker, adapter.homeVolume, toml);
+          const { path, written, skipped, cleanup } = await prepareMcpConfig(
+            this.deps.docker, adapter.homeVolume, mcp, agentCfg.mcp ?? {},
+          );
+          cleanupConfig = cleanup;
+          binds.push(`${toBind(path)}:/codex-home/config.toml:ro`);
           if (skipped.length) {
             console.warn(`[mcp] 未在注册表中的 MCP 声明已跳过: ${skipped.join(', ')}（cfg.agents.${project.agent_id}.mcp）`);
           }
@@ -227,9 +299,8 @@ export class Runner {
         }
         const extra = project.extraPackages;
         effectiveImage = extra?.length
-          ? await this.installPackages(adapter.image, extra, project.id)
+          ? await this.installPackages(adapter.image, extra)
           : adapter.image;
-        await this.ensureVolume(adapter.homeVolume);
         const auth = await this.spawn({
           image: adapter.image, cmd: adapter.authCheckArgs(), binds,
           env: [], timeoutMs: 60_000, tag: `auth-${run.id}`,
@@ -246,12 +317,10 @@ export class Runner {
           return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
             { agentMessage: '宿主上未发现 codex CLI（PATH 无 codex，且未找到 GUI 运行时）。请安装 codex CLI 后重试。', filesChanged: [], diffStat: '' }, logPath, undefined);
         }
-        console.log(`🔍 [capability] 宿主 codex: ${hostCodex}`);
-        // auth：宿主 ~/.codex/auth.json（GUI/CLI 登录态原生共享）
-        const authPath = join(process.env.USERPROFILE ?? homedir(), '.codex', 'auth.json');
-        if (!existsSync(authPath)) {
+        const status = await hostCodexLoginStatus(hostCodex, cfg.proxy);
+        if (status.exitCode !== 0) {
           return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-            { agentMessage: '凭证缺失（capability 模式读宿主 ~/.codex/auth.json）：请先完成 codex 登录', filesChanged: [], diffStat: '' }, logPath, undefined);
+            { agentMessage: '宿主 Codex 无法确认登录。请用当前运行账号执行 desk auth，再继续任务。', filesChanged: [], diffStat: '' }, logPath, undefined);
         }
       }
 
@@ -262,27 +331,36 @@ export class Runner {
           { agentMessage: `checkpoint 失败：${cp.error}`, filesChanged: [], diffStat: '' }, logPath, undefined);
       }
       const anchor = cp.anchor;
+      if (anchor !== 'NO-GIT') {
+        store.updateRun(run.id, { checkpoint_sha: anchor });
+        record(`# checkpoint=${anchor}\n`);
+      }
 
       // ③ 主执行：resume（带反馈+旧会话）或 normal
       const priorSession = kind === 'resume' ? store.lastSessionOfTask(task.id) : undefined;
       let cmd = kind === 'resume' && priorSession
         ? adapter.buildResumeArgs(priorSession, task.pending_feedback!)
-        : adapter.buildArgs(task.prompt);
+        : adapter.buildArgs(kind === 'resume' ? `${task.prompt}\n\n人工续跑说明：${task.pending_feedback}` : task.prompt);
       // capability（能力优先）= 信任宿主环境：解除 codex Windows 沙箱降权
       // （默认命令跑在 CodexSandboxUsers 受限账户，.git 对其显式拒写 → fetch/commit/push 全废）
       if (isCapability) cmd = cmd.map(a => (a === 'workspace-write' ? 'danger-full-access' : a));
 
       let sessionId: string | undefined;
       let lastAgentText = '';
+      let lastAgentError = '';
       const isNative = isCapability; // capability = 宿主原生执行
       // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
-      const nativeEnv = this.proxyEnv();
+      const nativeEnv = hostCodexProxyEnv(cfg.proxy);
       const onLine = (line: string) => {
-        appendFileSync(logPath, line + '\n');
+        record(line + '\n');
         const ev = adapter.parseLine(line);
         if (!ev) return;
-        if (ev.type === 'session' && ev.sessionId && !sessionId) sessionId = ev.sessionId;
+        if (ev.type === 'session' && ev.sessionId && !sessionId) {
+          sessionId = ev.sessionId;
+          store.updateRun(run.id, { session_id: sessionId });
+        }
         if (ev.type === 'agent_message' && ev.text) lastAgentText = ev.text;
+        if (ev.type === 'error' && ev.text) lastAgentError = ev.text;
       };
       const main = isNative
         ? await this.runNativePath({
@@ -290,13 +368,14 @@ export class Runner {
             cwd: project.workspace_path, env: nativeEnv,
             timeoutMs: tmo, tag: `run-${run.id}`,
             onStdoutLine: onLine,
+            onPid: pid => store.updateRun(run.id, { worker: { kind: 'native', pid } }),
           })
         : await this.spawn({
             image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
             onStdoutLine: onLine,
+            onContainer: id => store.updateRun(run.id, { worker: { kind: 'docker', id } }),
           });
-      for (const l of main.err) appendFileSync(logPath, '[stderr] ' + l + '\n');
-      if (sessionId) store.updateRun(run.id, { session_id: sessionId });
+      for (const l of main.err) record('[stderr] ' + l + '\n');
 
       // ④ 收尾审计：宿主侧执行（相对 checkpoint 的改动清单）
       const audit = await hostAudit(project.workspace_path, anchor);
@@ -308,51 +387,48 @@ export class Runner {
         exitCode: main.exitCode,
         killed: main.killed,
         lastAgentText,
-        errTail: main.err.slice(-20).join('\n'),
+        errTail: [...main.err.slice(-20), lastAgentError].join('\n'),
       });
       // 结果报告（result 标记）：agent 自报部分完成 → 记录 remaining 供人决定后续
       const report = parseResultMarker(lastAgentText);
       const summary: RunSummary = {
-        agentMessage: lastAgentText || undefined,
+        agentMessage: result.status === 'blocked' ? lastAgentText || undefined
+          : stripAgentctlLines(lastAgentText).trim() || report?.summary || undefined,
         filesChanged, diffStat, sessionId,
         partial: report ? !report.done : undefined,
         remaining: report?.remaining,
       };
-      if (result.status === 'succeeded' && summary.partial) {
-        store.setTaskPartial(task.id, summary.remaining ?? '（agent 未给出明细）');
-      } else {
-        store.setTaskPartial(task.id, null);
-      }
       this.finish(task, project, run.id, result, summary, logPath, main.exitCode);
     } catch (e: any) {
       this.finish(task, project, run.id,
         { status: 'failed', blockedKind: 'unknown_error' },
         { agentMessage: `runner 异常: ${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath, undefined);
+    } finally {
+      cleanupConfig?.();
     }
   }
 
   private finish(
     task: Task, project: Project, runId: number,
-    result: ReturnType<typeof classifyRun>, summary: RunSummary, logPath: string, exitCode?: number,
+    result: ReturnType<typeof classifyRun>, summary: RunSummary, logPath?: string, exitCode?: number,
   ): void {
     const { store, events } = this.deps;
-    store.updateRun(runId, {
+    const retryViaCli = !!store.getMerge(task.id);
+    store.finishRun(runId, {
       status: result.status,
       exit_code: exitCode,
       blocked_kind: result.blockedKind,
       summary_json: JSON.stringify(summary),
       ended_at: new Date().toISOString(),
       log_path: logPath,
-    });
-    // 人工取消过的任务不再被 Run 终态覆盖
-    if (store.getTask(task.id)?.status !== 'cancelled') {
-      store.setTaskStatus(task.id, taskStatusAfterRun(task, store.getRun(runId)!, result));
-    }
+    }, taskStatusAfterRun(task, store.getRun(runId)!, result),
+    result.status === 'succeeded' && summary.partial ? summary.remaining ?? '（agent 未给出明细）' : null);
 
     if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', task, project, summary });
     else if (result.status === 'blocked') {
       // 从协议标记行提取人话问题：###AGENTCTL_BLOCKED### {"question":"..."}
-      let question: string | undefined;
+      let question: string | undefined = retryViaCli ? summary.agentMessage : undefined;
+      if (result.blockedKind === 'missing_result') question = 'Codex 已退出，但没有报告任务结果。请查看日志后决定是否续跑。';
       const markerLine = summary.agentMessage?.split('\n').find(l => l.includes(AGENTCTL_MARKER));
       if (markerLine) {
         try {
@@ -369,7 +445,7 @@ export class Runner {
       if (loopCount >= 3) {
         question = `⏸️ 该任务 1 小时内已阻塞 ${loopCount} 次（环境问题循环）。\n\n最新问题：${question ?? '（见日志）'}\n\n建议：先修复环境（缺工具/缺依赖/MCP 未接入）再 resume；或 resume 时明确授权降级方案。`;
       }
-      events.emit({ kind: 'run.blocked', task, project, blockedKind: result.blockedKind!, question });
-    } else events.emit({ kind: 'run.failed', task, project, reason: summary.agentMessage ?? 'unknown' });
+      events.emit({ kind: 'run.blocked', task, project, blockedKind: result.blockedKind!, question, retryViaCli });
+    } else events.emit({ kind: 'run.failed', task, project, reason: summary.agentMessage ?? 'unknown', retryViaCli });
   }
 }

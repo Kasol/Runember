@@ -26,8 +26,8 @@ export function buildEventMarkdown(
         HR,
         e.question ? `**❓ ${e.question}**` : '（详见任务日志）',
         HR,
-        `**📱 手机直接回复**（回答问题本身）：${LINE}\`resume ${e.task.id} 你的决定\``,
-        LINE + `或在群里 @机器人：\`resume ${e.task.id} 同意暂缓验收\``,
+        e.retryViaCli ? `处理后在宿主机运行 \`npm run desk -- retry ${e.task.id}\`。`
+          : `在群里 @机器人并回复 \`继续 ${e.task.id} 你的决定\`。`,
         detailLink,
       ].join(''),
     };
@@ -39,33 +39,33 @@ export function buildEventMarkdown(
         '### ❌ 任务失败',
         LINE + `**${t}**`,
         HR,
-        `**原因**：${e.reason.slice(0, 180)}`,
+        `**原因**：${e.reason}`,
         HR,
-        `**重试**：回复 \`retry ${e.task.id}\`${publicUrl ? ` · [看板详情](${publicUrl}/?task=${e.task.id})` : ''}`,
+        (e.retryViaCli ? `在宿主机运行 \`npm run desk -- retry ${e.task.id}\`` : `回复 \`重试 ${e.task.id}\``) +
+          (publicUrl ? ` · [看板详情](${publicUrl}/?task=${e.task.id})` : ''),
       ].join(''),
     };
   }
   if (e.kind === 'run.succeeded') {
     const s = e.summary;
     const partial = s.partial === true;
+    const summary = s.agentMessage && stripAgentctlLines(s.agentMessage);
     return {
       title: partial ? '⚠️ agentdesk 任务部分完成' : '✅ agentdesk 任务完成',
       text: [
         partial ? '### ⚠️ 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
-        LINE + `**${t}**`,
-        HR,
-        s.agentMessage ? `**📝 agent 总结**${LINE}> ${stripAgentctlLines(s.agentMessage).replace(/\n/g, LINE + '> ').slice(0, 260) || '(见未完成部分)'}` : '',
-        LINE,
+        t,
+        '---',
+        summary ? `**📝 agent 总结**\n\n${summary}` : '',
         s.filesChanged.length
-          ? `**🗂 改动 ${s.filesChanged.length} 个文件**${LINE}${s.filesChanged.slice(0, 5).map(f => `- \`${f}\``).join(LINE)}${s.filesChanged.length > 5 ? LINE + '- …' : ''}`
+          ? `**🗂 改动 ${s.filesChanged.length} 个文件**\n\n${s.filesChanged.map(f => `- \`${f}\``).join('\n')}`
           : '🗂 无文件改动',
-        s.diffStat ? LINE + `\`${s.diffStat.replace(/\n/g, ' · ').slice(0, 120)}\`` : '',
+        s.diffStat ? `\`\`\`\n${s.diffStat}\n\`\`\`` : '',
         partial && s.remaining
-          ? HR + `**📋 未完成部分**（可派后续任务）：${LINE}> ${s.remaining.slice(0, 200)}` +
-            LINE + `回复 \`draft ${e.project.name} 继续完成：${s.remaining.slice(0, 40)}\``
+          ? `---\n\n**📋 未完成部分**\n\n${s.remaining}\n\n回复 \`继续 ${e.task.id}\` 可以续跑此任务。`
           : '',
-        detailLink,
-      ].join(''),
+        detailLink.trimStart(),
+      ].filter(Boolean).join('\n\n'),
     };
   }
   // run.started
@@ -74,7 +74,7 @@ export function buildEventMarkdown(
     text: [
       '### ▶️ 任务开始',
       LINE + `**${t}**`,
-      LINE + `> ${e.task.prompt.slice(0, 120)}`,
+      `\n\n${e.task.prompt}\n`,
       detailLink,
     ].join(''),
   };

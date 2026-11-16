@@ -4,7 +4,13 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { loadEnvFile } from 'node:process';
+
+export function loadLocalEnv(): void {
+  const path = join(process.env.AGENTDESK_APP_DIR ?? process.cwd(), '.env');
+  if (existsSync(path)) loadEnvFile(path);
+}
 
 export interface AppConfig {
   server: { host: string; port: number; token: string; publicUrl: string };
@@ -20,9 +26,17 @@ export interface AppConfig {
   /** 通知渠道列表（M3 起各渠道实现读这里；M1 只有 console） */
   notify: { channels: Array<Record<string, unknown>> };
   /** 反馈通道：把人的决定送回 daemon（钉钉 Stream = 手机闭环） */
-  feedback: { dingtalkStream?: { clientId: string; clientSecret: string } };
+  feedback: { dingtalkStream?: DingTalkStreamConfig };
   dataDir: string;
-  proxy: { httpsProxy: string; httpProxy: string };
+  logDir: string;
+  proxy: { httpsProxy: string; httpProxy: string; nativeHttpsProxy: string; nativeHttpProxy: string };
+}
+
+export interface DingTalkStreamConfig {
+  clientId: string;
+  clientSecret: string;
+  allowedSenderIds?: string[];
+  allowedConversationIds?: string[];
 }
 
 const DEFAULTS: AppConfig = {
@@ -43,7 +57,8 @@ const DEFAULTS: AppConfig = {
   notify: { channels: [] },
   feedback: {},
   dataDir: join(homedir(), '.agentdesk'),
-  proxy: { httpsProxy: '', httpProxy: '' },
+  logDir: '',
+  proxy: { httpsProxy: '', httpProxy: '', nativeHttpsProxy: '', nativeHttpProxy: '' },
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -66,7 +81,7 @@ function coerce(v: string): string | number | boolean {
   return v;
 }
 
-export function loadConfig(overrides?: { configPath?: string; dataDir?: string; port?: number }): AppConfig {
+export function loadConfig(overrides?: { configPath?: string; dataDir?: string; logDir?: string; port?: number }): AppConfig {
   let cfg = structuredClone(DEFAULTS);
 
   // ① 用户配置文件
@@ -80,23 +95,55 @@ export function loadConfig(overrides?: { configPath?: string; dataDir?: string; 
   // ② 环境变量：AGENTDESK_SCHEDULER__CONCURRENCY=2 → scheduler.concurrency
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith('AGENTDESK_') || key === 'AGENTDESK_CONFIG' || value === undefined) continue;
-    const path = key.slice('AGENTDESK_'.length).split('__').map(s => s.toLowerCase());
+    const path = key.slice('AGENTDESK_'.length).split('__');
+    if (path.length < 2) continue; // CLI/工具环境变量单独读取
     let node: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
+    const field = (section: Record<string, unknown>, part: string) =>
+      Object.keys(section).find(name => name.toLowerCase() === part.toLowerCase());
+    if (['scheduler', 'server', 'proxy'].includes(path[0]!.toLowerCase())) {
+      const section = field(node, path[0]!);
+      if (!section || !isPlainObject(node[section]) || path.length !== 2 || !field(node[section], path[1]!)) {
+        throw new Error(`未知配置环境变量 ${key}`);
+      }
+    }
     for (let i = 0; i < path.length - 1; i++) {
-      const k = path[i]!;
+      const k = field(node, path[i]!) ?? path[i]!.toLowerCase();
+      if (['__proto__', 'constructor', 'prototype'].includes(k)) throw new Error(`无效配置环境变量 ${key}`);
       if (!isPlainObject(node[k])) node[k] = {};
       node = node[k] as Record<string, unknown>;
     }
-    node[path[path.length - 1]!] = coerce(value);
+    const leaf = field(node, path.at(-1)!) ?? path.at(-1)!.toLowerCase();
+    if (['__proto__', 'constructor', 'prototype'].includes(leaf)) throw new Error(`无效配置环境变量 ${key}`);
+    if (path[0]!.toLowerCase() === 'scheduler' || (path[0]!.toLowerCase() === 'server' && leaf === 'port')) {
+      node[leaf] = coerce(value);
+    } else {
+      node[leaf] = value;
+    }
   }
 
   // ③ CLI 覆盖（最高优先级）
-  if (overrides?.dataDir) cfg.dataDir = overrides.dataDir;
-  if (overrides?.port) cfg.server.port = overrides.port;
+  cfg.dataDir = overrides?.dataDir ?? process.env.AGENTDESK_DATA_DIR ?? cfg.dataDir;
+  const logDir = overrides?.logDir ?? process.env.AGENTDESK_LOG_DIR ?? cfg.logDir;
+  if (typeof logDir !== 'string') throw new Error('logDir 必须为目录路径字符串');
+  cfg.logDir = resolve(cfg.dataDir, logDir);
+  cfg.server.port = overrides?.port ?? cfg.server.port;
+  if (!Number.isInteger(cfg.server.port) || cfg.server.port < 1 || cfg.server.port > 65535) {
+    throw new Error('server.port 必须为 1–65535 的整数');
+  }
 
   // ④ 代理兜底：配置为空时沿用进程环境（开发时 .env 注入的 host.docker.internal 代理）
   if (!cfg.proxy.httpsProxy && process.env.HTTPS_PROXY) cfg.proxy.httpsProxy = process.env.HTTPS_PROXY;
   if (!cfg.proxy.httpProxy && process.env.HTTP_PROXY) cfg.proxy.httpProxy = process.env.HTTP_PROXY;
+
+  for (const key of ['concurrency', 'tickMs', 'taskTimeoutMin'] as const) {
+    if (!Number.isSafeInteger(cfg.scheduler[key]) || cfg.scheduler[key] < 1) {
+      throw new Error(`scheduler.${key} 必须为正整数`);
+    }
+  }
+  if (!['127.0.0.1', '::1', 'localhost'].includes(cfg.server.host) &&
+      (typeof cfg.server.token !== 'string' || !cfg.server.token.trim())) {
+    throw new Error('daemon 监听非回环地址时必须配置 server.token');
+  }
 
   return cfg;
 }

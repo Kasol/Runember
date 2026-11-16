@@ -15,63 +15,79 @@
  *   @机器人 resume 4 可以合并，今晚不部署
  *   @机器人 retry 4 / cancel 4 / status / 帮助
  */
-import { DWClient, EventAck, TOPIC_ROBOT } from 'dingtalk-stream-sdk-nodejs';
+import { createHash } from 'node:crypto';
+import { DWClient, TOPIC_ROBOT } from 'dingtalk-stream';
 import type { FeedbackAction, FeedbackChannel } from '@agentdesk/core';
-import { learn } from './dingtalk-state.js';
+import type { DingTalkStreamConfig } from './config.js';
 
 interface IncomingMessage {
+  msgId?: string;
+  senderId?: string;
+  senderStaffId?: string;
   text?: { content?: string };
-  senderNick?: string;
   sessionWebhook?: string;
   conversationId?: string;
-  robotCode?: string;
 }
 
-function parseCommand(raw: string, store?: unknown): FeedbackAction {
+export function parseCommand(raw: string): FeedbackAction {
   const s = raw.trim().replace(/^@\S+\s*/, '');
-  if (/^(status|状态|队列)$/i.test(s)) return { type: 'status' };
-  if (/^(detail|详情|明细|列表)$/i.test(s)) return { type: 'detail' };
+  const taskId = (value: string) => {
+    const id = Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  };
+  const status = s.match(/^(?:status|状态|队列|detail|详情|明细|列表)(?:\s*#?(\d+))?$/i);
+  if (status) {
+    if (!status[1]) return { type: 'status' };
+    const id = taskId(status[1]);
+    return id ? { type: 'status', taskId: id } : { type: 'help' };
+  }
   if (/^(projects|项目|项目列表)$/i.test(s)) return { type: 'projects' };
   if (/^(help|帮助|\?|？)$/i.test(s)) return { type: 'help' };
-  // draft 建草稿（不执行）；run/执行 是"执行动作"（把草稿/新描述转正入队）
   if (/^(draft|草稿)\s/i.test(s)) return { type: 'draft', prompt: s.replace(/^(?:draft|草稿)\s+/i, '') };
-  if (/^(run|执行|派任务)\s/i.test(s)) return { type: 'run', prompt: s.replace(/^(?:run|执行|派任务)\s+/i, '') };
+  const run = s.match(/^(?:run|执行|派任务)\s+([\s\S]+)$/i);
+  if (run) {
+    const prompt = run[1]!;
+    const reference = prompt.match(/^#?(\d+)(?:\s+([\s\S]+))?$/);
+    if (!reference) return { type: 'run', prompt };
+    const id = taskId(reference[1]!);
+    return id ? { type: 'run', taskId: id, prompt: reference[2] } : { type: 'help' };
+  }
 
-  // resume 可省编号：单阻塞任务时自动指向它（applyTaskAction 内解析歧义）
-  let m = s.match(/^(?:resume|继续|恢复)\s*(?:#?(\d+))?\s*[:：,，]?\s*([\s\S]*)$/i);
-  if (m) return { type: 'resume', taskId: m[1] ? Number(m[1]) : undefined, feedback: m[2]!.trim() || '请继续' };
-  m = s.match(/^(?:retry|重试)\s*#?(\d+)\s*$/i);
-  if (m) return { type: 'retry', taskId: Number(m[1]) };
-  m = s.match(/^(?:cancel|取消|终止|不要了|算了)\s*#?(\d+)\s*$/i);
-  if (m) return { type: 'cancel', taskId: Number(m[1]) };
-
-  // 自然语序倒装：「16 不要了」「16 取消」「17 继续 xxx」——编号在前的真实用户习惯
-  m = s.match(/^#?(\d+)\s*(?:不要了|算了|取消|终止|cancel)\s*$/i);
-  if (m) return { type: 'cancel', taskId: Number(m[1]) };
-  m = s.match(/^#?(\d+)\s*(?:重试|retry)\s*$/i);
-  if (m) return { type: 'retry', taskId: Number(m[1]) };
-  m = s.match(/^#?(\d+)\s*(?:继续|恢复|resume)\s*[:：,，]?\s*([\s\S]*)$/i);
-  if (m) return { type: 'resume', taskId: Number(m[1]), feedback: m[2]!.trim() || '请继续' };
+  const resume = s.match(/^(?:resume|继续|恢复)\s*#?(\d+)(?=$|[\s:：,，])[\s:：,，]*([\s\S]*)$/i)
+    ?? s.match(/^#?(\d+)\s*(?:resume|继续|恢复)(?=$|[\s:：,，])[\s:：,，]*([\s\S]*)$/i);
+  if (resume) {
+    const id = taskId(resume[1]!);
+    return id ? { type: 'resume', taskId: id, feedback: resume[2]!.trim() || undefined } : { type: 'help' };
+  }
+  const retry = s.match(/^(?:retry|重试)\s*#?(\d+)$/i) ?? s.match(/^#?(\d+)\s*(?:retry|重试)$/i);
+  if (retry) {
+    const id = taskId(retry[1]!);
+    return id ? { type: 'retry', taskId: id } : { type: 'help' };
+  }
+  const cancel = s.match(/^(?:cancel|取消)\s*#?(\d+)$/i) ?? s.match(/^#?(\d+)\s*(?:cancel|取消)$/i);
+  if (cancel) {
+    const id = taskId(cancel[1]!);
+    return id ? { type: 'cancel', taskId: id } : { type: 'help' };
+  }
   return { type: 'help' };
 }
 
 export class DingTalkStreamChannel implements FeedbackChannel {
   readonly name = 'dingtalk-stream';
   private client?: DWClient;
-  /** 钉钉 Stream 是 at-least-once 投递：按 messageId 幂等去重 */
+  /** 钉钉 Stream 可能重投：优先按机器人消息的 msgId 去重 */
   private seenMessages = new Map<string, number>();
 
-  constructor(private cfg: { clientId: string; clientSecret: string }) {}
+  constructor(private cfg: DingTalkStreamConfig) {}
 
   private isDuplicate(messageId: string | undefined): boolean {
     if (!messageId) return false;
     // 顺带清理 10 分钟前的旧 id，防集合无限增长
     const now = Date.now();
     for (const [k, t] of this.seenMessages) if (now - t > 600_000) this.seenMessages.delete(k);
-    const seen = this.seenMessages.has(messageId);
+    if (this.seenMessages.has(messageId)) return true;
     this.seenMessages.set(messageId, now);
-    console.log(`🔒 [dedup] mid=${messageId.slice(0, 20)} seen=${seen} mapSize=${this.seenMessages.size}`);
-    return seen;
+    return false;
   }
 
   async start(
@@ -84,46 +100,66 @@ export class DingTalkStreamChannel implements FeedbackChannel {
       // → close 事件 → SDK autoReconnect 自动重建）。默认 false，半开连接会永久僵尸。
       keepAlive: true,
     });
+    client.debug = false;
+    const senders = new Set(Array.isArray(this.cfg.allowedSenderIds) ? this.cfg.allowedSenderIds : []);
+    const conversations = new Set(Array.isArray(this.cfg.allowedConversationIds) ? this.cfg.allowedConversationIds : []);
+    if (!senders.size || !conversations.size) console.warn('[dingtalk-stream] 尚未配置发送者和会话授权，群指令暂不可用');
 
-    // ACK 补偿：registerCallbackListener 走 EventEmitter，async 监听器的返回值不会
-    // 被回传给钉钉（SDK 只把 registerAllEventListener 的【同步】返回值作为 ACK 发出）。
-    // 不 ACK → 钉钉认为投递失败 → 60 秒整重推（实测证据：10:40:58.691 → 10:41:58.695）。
-    client.registerAllEventListener((message: any) => {
-      return { status: EventAck.SUCCESS, message: 'OK' };
-    });
-
-    client.registerCallbackListener(TOPIC_ROBOT, async (res: any) => {
-      try {
-        const msg: IncomingMessage = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
-        const content = msg.text?.content ?? '';
-        const hdrMsgId = (res as any)?.headers?.messageId as string | undefined;
-        const connId = (res as any)?.headers?.connectionId as string | undefined;
-        // 学习群标识（应用机器人主动推送 groupMessages/send 需要它）
-        if (msg.conversationId) learn({ conversationId: msg.conversationId, robotCode: msg.robotCode });
-        // 幂等：按 messageId 去重（钉钉 at-least-once 重推时 mid 相同）。
-        // 注意：不做内容级去重——用户 10 分钟内重发相同指令是正常行为，不能拦。
-        const dupByHeader = this.isDuplicate('mid:' + hdrMsgId);
-        if (dupByHeader) {
-          console.log(`♻️  [dingtalk-stream] 重复投递已忽略 (mid=${hdrMsgId ?? '-'} conn=${connId ?? '-'})`);
-          return { status: EventAck.SUCCESS };
+    client.registerCallbackListener(TOPIC_ROBOT, async (delivery) => {
+      const callbackId = delivery.headers.messageId;
+      const traceId = callbackId ? createHash('sha256').update(callbackId).digest('hex').slice(0, 12) : '-';
+      const ack = () => {
+        if (!callbackId) {
+          console.warn('[dingtalk-stream] 回调缺少 messageId，无法发送 ACK');
+          return;
         }
-        console.log(
-          `📥 [dingtalk-stream] ${msg.senderNick ?? '?'} (mid=${hdrMsgId?.slice(0, 8)} conn=${connId?.slice(0, 8)}): ${content.slice(0, 60)}`,
-        );
-
+        try {
+          client.socketCallBackResponse(callbackId, {});
+          console.log(`[dingtalk-stream] 已发 ACK (delivery=${traceId})`);
+        } catch (error) {
+          console.error(`[dingtalk-stream] ACK 发送失败 (delivery=${traceId}):`, error);
+        }
+      };
+      try {
+        const msg: IncomingMessage = typeof delivery.data === 'string' ? JSON.parse(delivery.data) : delivery.data;
+        const messageKey = msg.msgId ? `msg:${msg.msgId}` : callbackId ? `callback:${callbackId}` : undefined;
+        if (this.isDuplicate(messageKey)) {
+          console.log(`♻️ [dingtalk-stream] 重复投递已忽略 (delivery=${traceId})`);
+          ack();
+          return;
+        }
+        const sender = msg.senderStaffId || msg.senderId;
+        const conversation = msg.conversationId;
+        const content = msg.text?.content ?? '';
+        if (!sender || !conversation || !senders.has(sender) || !conversations.has(conversation)) {
+          const probe = content.trim().match(/^agentdesk-pair ([a-f0-9]{16})$/);
+          if (probe && sender && conversation) {
+            const challenge = createHash('sha256').update(probe[1]!).digest('hex');
+            console.info('[dingtalk-stream] 本机授权核对 ' + JSON.stringify({ challenge, sender, conversation }));
+          }
+          console.warn(`[dingtalk-stream] 拒绝未授权指令 (delivery=${traceId})`);
+          ack();
+          await this.reply(msg.sessionWebhook, '此钉钉账号或会话尚未授权，请在 agentdesk 宿主机完成配置。');
+          return;
+        }
         const action = parseCommand(content);
+        console.log(`📥 [dingtalk-stream] 收到指令 (delivery=${traceId} action=${action.type})`);
         const result = await dispatch(action);
+        ack();
         await this.reply(msg.sessionWebhook, `${result.ok ? '' : '❌ '}${result.message}`);
-        return { status: EventAck.SUCCESS };
       } catch (e: any) {
         console.error('[dingtalk-stream] 处理消息失败:', e?.message ?? e);
-        return { status: EventAck.SUCCESS };
       }
     });
 
-    await client.connect();
+    try {
+      await client.connect();
+    } catch {
+      throw new Error('钉钉 Stream 连接失败，请检查应用凭证和网络');
+    }
     this.client = client;
-    console.log('📲 钉钉 Stream 反馈通道已连接（群里 @机器人 发指令）');
+    if (client.connected) console.log('📲 钉钉 Stream 反馈通道已连接（群里 @机器人 发指令）');
+    else console.warn('[dingtalk-stream] 首次连接未完成，SDK 将重试');
   }
 
   /** 通过消息自带的 sessionWebhook 回复（临时口，无需 accessToken） */

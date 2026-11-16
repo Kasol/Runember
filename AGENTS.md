@@ -55,14 +55,15 @@ npm run typecheck                                # tsc --noEmit（提交前必�
 
 ### 钉钉 Stream 通道
 - **必须 `keepAlive: true`**（SDK 默认 false）：WS ping/pong 心跳 8s 一轮，防半开僵尸连接（NAT 过期/网络切换导致的"静默断连"靠它 8 秒自愈）
-- **ACK 只认 `registerAllEventListener` 的同步返回值**：`registerCallbackListener`（EventEmitter）的 async 返回值会被丢弃，不 ACK 钉钉 60s 重推
-- 去重只用 messageId，**禁止内容级去重**（用户重发相同指令是合法行为，内容去重会吞指令——踩过）
+- **机器人 CALLBACK 要通过 Stream 主动 ACK**：用 `client.socketCallBackResponse(headers.messageId, {})` 确认每次投递，包括重复投递。SDK 对 EVENT 的自动 ACK 走独立路径。缺少 CALLBACK ACK 会触发约 60 秒后的重推。
+- 群指令必须同时通过发送者和会话授权。主动通知用显式配置的群，排查日志只输出必要的连接状态和投递标识。
+- 去重优先用机器人消息体的 `msgId`，缺失时用回调头的 `messageId`。**禁止内容级去重**，用户可以重新发送相同指令。
 - `~/.codex/config.toml` 的 MCP 配置（如 GUI 的 node_repl）在 CLI 会话里可能依赖 GUI 会话变量而不可用；第三方标准 MCP（url/command 型）原生可用
 
 ### 结果协议（任务收尾契约）
 - agent 结束前必须输出 `###AGENTCTL_RESULT### {"done":bool,"summary":...,"remaining":...}`
 - `done:false` → 任务标记部分完成（partial_remaining 落库），三端可见 + 一键后续任务
-- 续跑部分完成任务：`run <编号> 继续`（同会话 resume，语义 = 显式提权，插队合理已拍板）
+- 续跑阻塞或部分完成任务：`继续 <编号> [说明]` 或 `resume <编号> [说明]`，编号可带 `#`。
 - 展示 agent 总结时用 `stripAgentctlLines()` 剥离协议标记行，别让协议原文漏给用户
 
 ### 进程管理

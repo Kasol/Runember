@@ -30,6 +30,8 @@ export type BlockedKind =
   | 'quota_exhausted'    // 额度耗尽（429 / usage limit —— Plus 订阅的周窗口）
   | 'external_write'     // 任务期间检测到外部修改（host-dir 模式的竞态防护，预留）
   | 'timeout'            // 超时被看门狗击杀
+  | 'interrupted'        // daemon 中断，无法确认已完成
+  | 'missing_result'     // CLI 正常退出，但任务结果未报告
   | 'unknown_error';
 
 /**
@@ -84,6 +86,8 @@ export interface Run {
   kind: 'normal' | 'resume';
   /** adapter 会话 id（codex thread id），续跑的钥匙 */
   session_id?: string;
+  checkpoint_sha?: string;
+  worker?: { kind: 'native'; pid: number } | { kind: 'docker'; id: string };
   status: RunStatus;
   exit_code?: number;
   blocked_kind?: BlockedKind;
@@ -170,7 +174,9 @@ export function classifyRun(input: ClassifyInput): ClassifyResult {
   if (input.lastAgentText.includes(AGENTCTL_MARKER)) {
     return { status: 'blocked', blockedKind: 'approval_needed' };
   }
-  if (input.exitCode === 0) return { status: 'succeeded' };
+  if (input.exitCode === 0) return parseResultMarker(input.lastAgentText)
+    ? { status: 'succeeded' }
+    : { status: 'blocked', blockedKind: 'missing_result' };
   const t = (input.errTail + '\n' + input.lastAgentText).toLowerCase();
   if (/401|unauthorized|not logged in|未登录|invalid api key/.test(t)) {
     return { status: 'blocked', blockedKind: 'auth_missing' };
@@ -243,8 +249,8 @@ export interface AdapterEvent {
 export type NotifyEvent =
   | { kind: 'run.started'; task: Task; project: Project }
   | { kind: 'run.succeeded'; task: Task; project: Project; summary: RunSummary }
-  | { kind: 'run.failed'; task: Task; project: Project; reason: string }
-  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string };
+  | { kind: 'run.failed'; task: Task; project: Project; reason: string; retryViaCli?: boolean }
+  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string; retryViaCli?: boolean };
 
 export interface Notifier {
   readonly name: string;
@@ -263,7 +269,7 @@ export interface FeedbackAction {
   type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run' | 'draft' | 'projects';
   taskId?: number;
   feedback?: string;
-  /** run/draft 指令：任务描述（或纯数字 = 引用已有任务编号）与目标项目 */
+  /** 新任务描述，或启动草稿时给已有任务追加的说明 */
   prompt?: string;
   projectId?: number;
 }

@@ -71,6 +71,10 @@ export function buildNotifiers(
       list.push(new DingTalkAppNotifier(
         appCreds.clientId, appCreds.clientSecret, publicUrl,
         (ch.events as string[] | undefined) ?? ['blocked', 'failed'],
+        {
+          conversationId: typeof ch.conversationId === 'string' ? ch.conversationId : undefined,
+          robotCode: typeof ch.robotCode === 'string' ? ch.robotCode : undefined,
+        },
       ));
     } else {
       console.warn(`[notify] 未知渠道类型: ${String(ch.type)}，已跳过`);

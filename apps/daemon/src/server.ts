@@ -4,7 +4,7 @@
  */
 import Fastify, { FastifyInstance } from 'fastify';
 import { availableAgents } from '@agentdesk/adapters';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, createReadStream, existsSync } from 'node:fs';
 import type { Notifier, TaskStatus } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
@@ -12,26 +12,76 @@ import type { Scheduler } from './scheduler.js';
 import { getAdapterId } from './util.js';
 import { hostGitAvailable, setupProjectGit } from './hostgit.js';
 import { checkIsolationCompatibility } from './platform.js';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
+import { runDoctor } from './doctor.js';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
+import type { MergePlan } from './merge.js';
 
 export function buildServer(deps: {
   cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker; notifiers: Notifier[];
+  webDir?: string;
+  control?: { instanceId: string; key: string; stop: () => void };
 }): FastifyInstance {
   const { cfg, store, scheduler } = deps;
   const app = Fastify({ logger: false });
+  const canManageMerge = (ip: string) =>
+    !!cfg.server.token || ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
 
   app.addHook('onRequest', async (req, reply) => {
-    if (!cfg.server.token || req.url === '/healthz') return;
+    if (!cfg.server.token || !req.url.startsWith('/api/')) return;
     if (req.headers['x-agentdesk-token'] !== cfg.server.token) {
       await reply.code(401).send({ error: 'unauthorized' });
     }
   });
 
-  app.get('/healthz', async () => ({ ok: true, ts: Date.now() }));
+  app.get('/healthz', async () => ({ ok: true, ts: Date.now(), instanceId: deps.control?.instanceId }));
+
+  if (deps.control) app.post('/api/shutdown', async (req, reply) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.ip) ||
+        req.headers['x-agentdesk-control'] !== deps.control!.key) {
+      return reply.code(403).send({ error: '请从本机使用 desk stop。' });
+    }
+    reply.raw.once('finish', deps.control!.stop);
+    return reply.code(202).send({ ok: true });
+  });
+
+  const webDir = deps.webDir;
+  if (webDir && existsSync(join(webDir, 'index.html'))) {
+    app.get('/', async (_req, reply) => reply.type('text/html; charset=utf-8')
+      .header('cache-control', 'no-cache').send(createReadStream(join(webDir, 'index.html'))));
+    app.get<{ Params: { name: string } }>('/assets/:name', async (req, reply) => {
+      const name = req.params.name;
+      const types: Record<string, string> = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+      const type = types[extname(name)];
+      if (!/^[A-Za-z0-9_.-]+$/.test(name) || !type || !existsSync(join(webDir, 'assets', name))) {
+        return reply.code(404).send({ error: '资源不存在' });
+      }
+      return reply.type(type).header('cache-control', 'public, max-age=31536000, immutable')
+        .send(createReadStream(join(webDir, 'assets', name)));
+    });
+  }
+
+  app.get('/api/setup/check', async () => ({ report: await runDoctor(cfg) }));
+
+  app.post<{ Body: MergePlan & { project: string } }>('/api/merge-tasks', async (req, reply) => {
+    if (!canManageMerge(req.ip)) {
+      return reply.code(403).send({ error: '远程自动合并需要 API token' });
+    }
+    const { project, source, base, test, retireDev = false } = req.body ?? {};
+    if (typeof project !== 'string' || typeof source !== 'string' || typeof base !== 'string'
+        || !source || !base || source === base || source.startsWith('-') || base.startsWith('-')
+        || typeof test !== 'string' || !test.trim() || typeof retireDev !== 'boolean') {
+      return reply.code(400).send({ error: '需要已注册项目、不同的源/目标分支及全量测试命令' });
+    }
+    const target = store.findProject(project);
+    if (!target) return reply.code(404).send({ error: '项目不存在' });
+    if (target.execution === 'isolation') return reply.code(400).send({ error: '自动化合并需要 capability 项目' });
+    const task = store.addMergeTask(target.id, { source, base, test, retireDev });
+    scheduler.tickNow();
+    return reply.code(202).send({ task });
+  });
 
   /** 通知通路测试：向所有已配置的外部渠道直接发一条测试消息 */
   app.post('/api/notify/test', async (_req, reply) => {
@@ -92,32 +142,11 @@ export function buildServer(deps: {
   app.post<{ Params: { id: string } }>('/api/projects/:id/recheck', async (req, reply) => {
     const p = store.getProject(Number(req.params.id));
     if (!p) return reply.code(404).send({ error: 'not found' });
-
-    const report: Array<{ name: string; ok: boolean; detail: string }> = [];
-
-    // ① 宿主工具清单
-    const gitInfo = await hostGitAvailable();
-    report.push({ name: '宿主 git', ok: gitInfo.ok, detail: gitInfo.ok ? gitInfo.version : '未安装（安全网依赖）' });
-
-    // ② 执行模式相关
+    const report = await runDoctor(cfg, { mode: p.execution, projectPath: p.workspace_path });
     if ((p.execution ?? 'capability') === 'isolation') {
       const plat = await checkIsolationCompatibility(p.workspace_path);
-      report.push({ name: '平台兼容性（隔离模式）', ok: plat.ok, detail: plat.summary });
-      if (!plat.ok) {
-        report.push({ name: '建议', ok: false, detail: "切换 execution='capability'（PATCH /api/projects/<id>）" });
-      }
-    } else {
-      report.push({ name: '执行模式', ok: true, detail: 'capability（宿主原生执行，无平台限制）' });
+      report.push({ name: '平台兼容性（隔离模式）', ok: plat.ok, detail: plat.summary, required: true });
     }
-
-    // ③ 凭证
-    const isCap = (p.execution ?? 'capability') === 'capability';
-    const authPath = join(process.env.USERPROFILE ?? homedir(), '.codex', 'auth.json');
-    report.push({ name: 'Codex 凭证', ok: existsSync(authPath), detail: existsSync(authPath) ? 'auth.json 存在' : '缺失（重新登录）' });
-
-    // ④ 项目路径
-    report.push({ name: '项目路径', ok: existsSync(p.workspace_path), detail: p.workspace_path });
-
     return { project: p, report };
   });
 
@@ -125,6 +154,9 @@ export function buildServer(deps: {
   app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
     const p = store.getProject(Number(req.params.id));
     if (!p) return reply.code(404).send({ error: 'not found' });
+    if (store.hasActiveTasks(p.id) || store.hasUnfinishedMerge(p.id)) {
+      return reply.code(409).send({ error: '请先完成或取消这个项目的活动任务和未完成合并' });
+    }
     store.deleteProject(p.id);
     return { ok: true, deleted: p.name };
   });
@@ -179,7 +211,9 @@ export function buildServer(deps: {
         ? store.getProject(project)
         : store.findProject(project);
       if (!p) return reply.code(404).send({ error: `项目不存在: ${project}` });
-      return reply.code(201).send({ task: store.addTask(p.id, prompt, { draft: !!draft }) });
+    const task = store.addTask(p.id, prompt, { draft: !!draft });
+    if (!draft) scheduler.tickNow();
+    return reply.code(201).send({ task });
     },
   );
 
@@ -210,13 +244,19 @@ export function buildServer(deps: {
   app.get<{ Params: { id: string } }>('/api/tasks/:id', async (req, reply) => {
     const t = store.getTask(Number(req.params.id));
     if (!t) return reply.code(404).send({ error: 'not found' });
-    return { task: t, runs: store.runsOfTask(t.id) };
+    const merge = store.getMerge(t.id);
+    return { task: t, runs: store.runsOfTask(t.id), merge: merge && {
+      repo: merge.state.repo, pr: merge.state.pr, verified: merge.state.verified, completed: merge.state.completed,
+    } };
   });
 
   /** 反馈闭环入口：与钉钉 Stream 通道共用 applyTaskAction，语义完全一致 */
   app.post<{ Params: { id: string }; Body: { type: string; feedback?: string } }>(
     '/api/tasks/:id/actions', async (req, reply) => {
       const { type, feedback } = req.body ?? ({} as any);
+      if (store.getMerge(Number(req.params.id)) && !canManageMerge(req.ip)) {
+        return reply.code(403).send({ error: '远程自动合并需要 API token' });
+      }
       const { applyTaskAction } = await import('./actions.js');
       const r = await applyTaskAction(store, scheduler,
         { type: type as any, taskId: Number(req.params.id), feedback });

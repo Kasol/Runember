@@ -1,13 +1,12 @@
 /**
  * 应用机器人主动推送腿（M3.5 合并方案）：
  * 用企业内部应用的 ClientID/Secret 换 accessToken，经 groupMessages/send 主动推群。
- * 目标群的 openConversationId/robotCode 由 Stream 通道从第一条 @消息 自动学习（dingtalk-state）。
+ * 主动推送使用显式配置的会话和机器人标识。
  * 与 webhook 机器人功能等价 —— 配置了应用机器人后可删除 webhook 机器人，单机器人双职责。
  */
 import type { NotifyEvent } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
 import { buildEventMarkdown } from './dingtalk-markdown.js';
-import { learned } from './dingtalk-state.js';
 
 export class DingTalkAppNotifier extends DedupedNotifier {
   readonly name = 'dingtalk-app';
@@ -18,11 +17,13 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     private clientSecret: string,
     private publicUrl: string,
     private events: string[] = ['blocked', 'failed', 'succeeded'],
+    private destination: { conversationId?: string; robotCode?: string } = {},
   ) {
     super(30 * 60 * 1000);
   }
 
   async sendRaw(title: string, text: string): Promise<void> {
+    if (!this.destination.conversationId) throw new Error('钉钉主动通知缺少 conversationId');
     await this.post(title, text);
   }
 
@@ -40,9 +41,9 @@ export class DingTalkAppNotifier extends DedupedNotifier {
   }
 
   private async post(title: string, markdown: string): Promise<void> {
-    const { conversationId, robotCode } = learned();
+    const { conversationId, robotCode } = this.destination;
     if (!conversationId) {
-      console.warn('[notify:dingtalk-app] 尚未学习群标识（在群里 @机器人 发一条消息即激活主动推送），本次跳过');
+      console.warn('[notify:dingtalk-app] 未配置 conversationId，本次跳过');
       return;
     }
     const token = await this.getToken();

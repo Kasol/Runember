@@ -11,10 +11,12 @@
  * 实现：spawn 宿主 codex 进程（stdin 关闭防挂起、超时 kill、日志同管道），
  * 事件解析/状态机/通知全部复用（同 AgentAdapter 接口）。
  */
-import { spawn as nodeSpawn, ChildProcess } from 'node:child_process';
+import { execFile, spawn as nodeSpawn, ChildProcess } from 'node:child_process';
 import { Writable } from 'node:stream';
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
+import { delimiter, join, resolve as resolvePath } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
+import type { AppConfig } from './config.js';
 
 /**
  * 宿主 codex CLI 发现：
@@ -26,7 +28,21 @@ import { join } from 'node:path';
 let codexPathCache: string | undefined;
 
 export function findHostCodex(): string | undefined {
+  if (process.env.AGENTDESK_CODEX_PATH) {
+    const path = resolvePath(process.env.AGENTDESK_CODEX_PATH);
+    try {
+      accessSync(path, constants.X_OK);
+      return statSync(path).isFile() ? path : undefined;
+    } catch { return undefined; }
+  }
   if (codexPathCache && existsSync(codexPathCache)) return codexPathCache;
+  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    const path = resolvePath(dir.replace(/^"|"$/g, ''), process.platform === 'win32' ? 'codex.exe' : 'codex');
+    try {
+      accessSync(path, constants.X_OK);
+      if (statSync(path).isFile()) return (codexPathCache = path);
+    } catch { /* 尝试下一个 PATH 目录 */ }
+  }
 
   const localAppData = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? '', 'AppData', 'Local');
   const guiBinRoot = join(localAppData, 'OpenAI', 'Codex', 'bin');
@@ -41,6 +57,32 @@ export function findHostCodex(): string | undefined {
     if (best) { codexPathCache = best.path; return codexPathCache; }
   }
   return undefined;
+}
+
+export function hostCodexProxyEnv(proxy: AppConfig['proxy']): string[] {
+  const https = proxy.nativeHttpsProxy || proxy.httpsProxy;
+  const http = proxy.nativeHttpProxy || proxy.httpProxy;
+  return [
+    ...(https ? [`HTTPS_PROXY=${https}`, `https_proxy=${https}`] : []),
+    ...(http ? [`HTTP_PROXY=${http}`, `http_proxy=${http}`] : []),
+  ];
+}
+
+export async function hostCodexLoginStatus(path: string, proxy: AppConfig['proxy']): Promise<NativeProc> {
+  return runNative({ cmd: [path, 'login', 'status'], cwd: process.cwd(), env: hostCodexProxyEnv(proxy), timeoutMs: 10_000 });
+}
+
+export async function loginHostCodex(path: string, proxy: AppConfig['proxy'], deviceAuth: boolean): Promise<number> {
+  const env = { ...process.env };
+  for (const value of hostCodexProxyEnv(proxy)) {
+    const i = value.indexOf('=');
+    env[value.slice(0, i)] = value.slice(i + 1);
+  }
+  return new Promise((resolve, reject) => {
+    const child = nodeSpawn(path, deviceAuth ? ['login', '--device-auth'] : ['login'], { env, stdio: 'inherit' });
+    child.once('error', reject);
+    child.once('close', code => resolve(code ?? 1));
+  });
 }
 
 export interface NativeProc {
@@ -70,18 +112,23 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
     // stdin: 'ignore' —— codex 探测到 stdin 关闭不会挂起等待（M1 教训）
     const child = nodeSpawn(cmd[0]!, cmd.slice(1), {
       cwd,
-      env: env?.length ? { ...process.env, ...Object.fromEntries(env.map(e => e.split('='))) } : process.env,
+      env: env?.length ? { ...process.env, ...Object.fromEntries(env.map(pair => {
+        const split = pair.indexOf('=');
+        return [pair.slice(0, split), pair.slice(split + 1)];
+      })) } : process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       shell: false,
+      detached: process.platform !== 'win32',
     });
     onProc?.(child);
 
     const sink = (target: string[], onLine?: (l: string) => void): Writable => {
       let buf = '';
+      const decoder = new StringDecoder('utf8');
       const w = new Writable({
         write(chunk, _enc, cb) {
-          buf += chunk.toString('utf8');
+          buf += decoder.write(chunk);
           let nl: number;
           while ((nl = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, nl).replace(/\r+$/, '');
@@ -90,14 +137,18 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
           }
           cb();
         },
-        final(cb) { if (buf.trim()) target.push(buf); cb(); },
+        final(cb) {
+          buf += decoder.end();
+          if (buf.trim()) { target.push(buf); onLine?.(buf); }
+          cb();
+        },
       });
       return w;
     };
     child.stdout?.pipe(sink(out, onStdoutLine));
     child.stderr?.pipe(sink(err));
 
-    const timer = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeoutMs);
+    const timer = setTimeout(() => { killed = true; killProcessTree(child); }, timeoutMs);
     child.on('close', code => {
       clearTimeout(timer);
       resolve({ exitCode: code ?? -1, killed, out, err });
@@ -108,4 +159,15 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
       resolve({ exitCode: -1, killed, out, err });
     });
   });
+}
+
+export function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, error => {
+      if (error) child.kill('SIGKILL');
+    });
+  } else {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+  }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { client, STATUS_META, type Project, type Task, type Run } from './api';
+import { ApiError, client, setApiToken, STATUS_META, type Project, type Task, type Run, type MergeStatus } from './api';
 import { stripAgentctlLines } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 
@@ -11,8 +11,21 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [drafts, setDrafts] = useState<Task[]>([]);
   const [selected, setSelected] = useState<Scope>('all');
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTask, setSelectedTask] = useState<number | null>(() => {
+    const id = Number(new URLSearchParams(location.search).get('task'));
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  });
   const [error, setError] = useState('');
+  const [unauthorized, setUnauthorized] = useState(false);
+  const [token, setToken] = useState('');
+  const [showSetup, setShowSetup] = useState(false);
+  const openTask = (id: number | null) => {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set('task', String(id));
+    else url.searchParams.delete('task');
+    history.replaceState(null, '', url);
+    setSelectedTask(id);
+  };
 
   const refresh = async () => {
     try {
@@ -21,7 +34,11 @@ export default function App() {
       setTasks(t.tasks);
       setDrafts(dr.drafts);
       setError('');
-    } catch (e: any) { setError(e?.message ?? '无法连接 daemon'); }
+      setUnauthorized(false);
+    } catch (e: any) {
+      setUnauthorized(e instanceof ApiError && e.status === 401);
+      setError(e?.message ?? '无法连接 daemon');
+    }
   };
 
   useEffect(() => {
@@ -89,7 +106,7 @@ export default function App() {
     <div className="app">
       <header>
         <h1>agentdesk</h1>
-        <span className={error ? 'conn err' : 'conn'}>{error ? 'daemon 离线' : 'daemon 已连接'}</span>
+        <span className={error ? 'conn err' : 'conn'}>{unauthorized ? '需要连接密钥' : error ? 'daemon 离线' : 'daemon 已连接'}</span>
       </header>
 
       <ProjectStrip
@@ -100,9 +117,22 @@ export default function App() {
         onChanged={() => void refresh()}
       />
 
-      <NewTask projects={projects} defaultProjectId={selected} onCreated={() => void refresh()} />
-
-      {error && <div className="banner">{error}</div>}
+      <div className="row">
+        <NewTask projects={projects} defaultProjectId={selected} onCreated={() => void refresh()} />
+        <button onClick={() => setShowSetup(true)}>环境检查</button>
+      </div>
+      {showSetup && <SetupPanel onClose={() => setShowSetup(false)} />}
+      {unauthorized ? (
+        <form className="banner row" onSubmit={event => {
+          event.preventDefault();
+          setApiToken(token.trim());
+          void refresh();
+        }}>
+          <label>连接密钥 <input type="password" value={token} onChange={event => setToken(event.target.value)} /></label>
+          <button type="submit">连接</button>
+        </form>
+      ) : error && <div className="banner">{error}</div>}
+      {!error && !projects.length && <p className="dim">首次使用可先检查环境，登录宿主 Codex，再添加一个本机 Git 项目。</p>}
 
       <div className="columns six">
         <Column title={`📝 草稿 (${scopedDrafts.length})`} tone="draft"
@@ -110,7 +140,7 @@ export default function App() {
           {scopedDrafts.map((t, i) => (
             <DraftCard key={t.id} task={t} index={i} total={scopedDrafts.length}
               project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)}
+              onOpen={() => openTask(t.id)}
               onOp={draftOp}
               onMove={(id, dir) => {
                 const neighbor = scopedDrafts[dir === -1 ? i - 1 : i + 1];
@@ -125,22 +155,23 @@ export default function App() {
           empty={active.length ? null : '队列为空'}>
           {active.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)} />
+              onOpen={() => openTask(t.id)}
+              actions={t.status === 'queued' ? <button onClick={() => void act(t.id, 'cancel')}>取消</button> : undefined} />
           ))}
         </Column>
         <Column title={`⚠️ 阻塞 (${blocked.length})`} tone="warn"
           empty={blocked.length ? null : '没有阻塞任务'}>
           {blocked.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)}
-              actions={<button onClick={() => void act(t.id, 'resume', '请继续')}>继续</button>} />
+              onOpen={() => openTask(t.id)}
+              actions={<button onClick={() => openTask(t.id)}>处理阻塞</button>} />
           ))}
         </Column>
         <Column title={`✅ 成功 (${done.length})`} tone="settled"
           empty={done.length ? null : '暂无'}>
           {done.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)}
+              onOpen={() => openTask(t.id)}
               partial={!!t.partial_remaining}
               partialRemaining={t.partial_remaining ?? undefined}
               onFollowup={followup}
@@ -151,7 +182,7 @@ export default function App() {
           empty={failed.length ? null : '没有失败任务'}>
           {failed.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)}
+              onOpen={() => openTask(t.id)}
               actions={<button onClick={() => void act(t.id, 'retry')}>重试</button>} />
           ))}
         </Column>
@@ -159,13 +190,13 @@ export default function App() {
           empty={cancelled.length ? null : '暂无'}>
           {cancelled.map(t => (
             <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => setSelectedTask(t)} />
+              onOpen={() => openTask(t.id)} />
           ))}
         </Column>
       </div>
 
-      {selectedTask && (
-        <TaskPanel task={selectedTask} onClose={() => setSelectedTask(null)} onAct={act} />
+      {selectedTask && !unauthorized && (
+        <TaskPanel key={selectedTask} taskId={selectedTask} onClose={() => openTask(null)} onAct={act} />
       )}
     </div>
   );
@@ -399,27 +430,58 @@ function DraftCard(props: {
   );
 }
 
-function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number, type: string, fb?: string) => Promise<void> }) {
+function SetupPanel({ onClose }: { onClose: () => void }) {
+  const [report, setReport] = useState<Awaited<ReturnType<typeof client.setup>>['report']>([]);
+  const [message, setMessage] = useState('');
+  const [checking, setChecking] = useState(false);
+  const check = async () => {
+    setChecking(true);
+    setMessage('');
+    try { setReport((await client.setup()).report); }
+    catch (error) { setMessage((error as Error).message); }
+    finally { setChecking(false); }
+  };
+  useEffect(() => { void check(); }, []);
+  return <Modal title="宿主环境检查" onClose={onClose} width={580}>
+    <p>能力优先会以当前 Windows 用户身份在本机项目中运行。</p>
+    <ul>{report.map(row => <li key={row.name}>{row.ok ? '✅' : row.required ? '❌' : '⚠️'} {row.name} · {row.detail}</li>)}</ul>
+    {report.some(row => row.name === '宿主 Codex 登录' && !row.ok) && (
+      <p>在发布包目录打开终端，运行 <code>.\desk.cmd auth</code>，浏览器授权后再检查。源码运行方式为 <code>npm run desk -- auth</code>。</p>
+    )}
+    {message && <p role="alert">{message}</p>}
+    <button disabled={checking} onClick={() => void check()}>{checking ? '检查中…' : '重新检查'}</button>
+  </Modal>;
+}
+
+function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: number, type: string, fb?: string) => Promise<void> }) {
+  const [task, setTask] = useState<Task>();
+  const [merge, setMerge] = useState<MergeStatus>();
   const [runs, setRuns] = useState<Run[]>([]);
   const [feedback, setFeedback] = useState('');
   const [log, setLog] = useState<string[]>([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const d = await client.task(props.task.id);
-      if (!alive) return;
-      setRuns(d.runs);
-      const last = d.runs.at(-1);
-      if (last) {
-        const r = await client.run(last.id);
-        if (alive) setLog(r.logTail);
-      }
+      try {
+        const d = await client.task(props.taskId);
+        if (!alive) return;
+        setTask(d.task);
+        setMerge(d.merge);
+        setRuns(d.runs);
+        setError('');
+        const last = d.runs.at(-1);
+        if (last) {
+          const r = await client.run(last.id);
+          if (alive) setLog(r.logTail);
+        } else setLog([]);
+      } catch (e) { if (alive) setError((e as Error).message); }
     };
     void load();
     const timer = setInterval(() => void load(), 3000);
     return () => { alive = false; clearInterval(timer); };
-  }, [props.task.id]);
+  }, [props.taskId]);
 
   const lastRun = runs.at(-1);
   const summary = lastRun?.summary_json ? JSON.parse(lastRun.summary_json) : null;
@@ -428,10 +490,16 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
     <div className="overlay" onClick={props.onClose}>
       <div className="panel" onClick={e => e.stopPropagation()}>
         <div className="panel-head">
-          <h3>#{props.task.id} · {STATUS_META[props.task.status].label}</h3>
+          <h3>#{props.taskId}{task ? ` · ${STATUS_META[task.status].label}` : ''}</h3>
           <button className="close" onClick={props.onClose}>✕</button>
         </div>
-        <p className="prompt-full">{props.task.prompt}</p>
+        {error && <p role="alert">{error}</p>}
+        {!task && !error && <p>正在读取任务…</p>}
+        {task && <p className="prompt-full">{task.prompt}</p>}
+        {merge?.repo && merge.pr && (
+          <p><a href={`https://github.com/${merge.repo}/pull/${merge.pr}`} target="_blank" rel="noreferrer">查看 PR #{merge.pr}</a></p>
+        )}
+        {merge?.verified && <p className="dim">已验证提交 <code>{merge.verified.head}</code></p>}
 
         {summary?.agentMessage && (
           <div className="summary">
@@ -443,17 +511,18 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
           </div>
         )}
 
-        {props.task.status === 'blocked' && (
+        {task?.status === 'blocked' && (
           <div className="feedback-box">
-            <textarea
+            {!merge && <textarea
               placeholder="输入你的决定（如：可以合并，今晚不部署）…"
               value={feedback} onChange={e => setFeedback(e.target.value)}
-            />
+            />}
             <div className="row">
-              <button className="primary" onClick={() => { void props.onAct(props.task.id, 'resume', feedback || '请继续'); setFeedback(''); }}>
-                带决定续跑
-              </button>
-              <button onClick={() => void props.onAct(props.task.id, 'cancel')}>取消任务</button>
+              {merge ? <button className="primary" onClick={() => void props.onAct(task.id, 'retry')}>核对并继续合并</button>
+                : <button className="primary" onClick={() => { void props.onAct(task.id, 'resume', feedback || '请继续'); setFeedback(''); }}>
+                  带决定续跑
+                </button>}
+              <button onClick={() => void props.onAct(task.id, 'cancel')}>取消任务</button>
             </div>
           </div>
         )}
@@ -464,6 +533,7 @@ function TaskPanel(props: { task: Task; onClose: () => void; onAct: (id: number,
             <div key={r.id} className="run-row">
               run#{r.id} · {r.kind} · [{r.status}]{r.blocked_kind ? ` · ${r.blocked_kind}` : ''}
               {r.session_id && <span className="dim"> · session {r.session_id.slice(0, 8)}</span>}
+              {r.checkpoint_sha && <p className="dim">Git checkpoint <code>{r.checkpoint_sha}</code></p>}
             </div>
           ))}
         </div>
@@ -486,15 +556,15 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
   useEffect(() => {
     if (!open) return;
     if (typeof props.defaultProjectId === 'number') setProject(String(props.defaultProjectId));
-    else if (props.projects.length && !project) setProject(String(props.projects[0]!.id));
+    else if (props.projects.length && !props.projects.some(p => String(p.id) === project)) setProject(String(props.projects[0]!.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间初始化
   }, [open]);
 
-  const submit = async () => {
-    if (!prompt.trim() || busy) return;
+  const submit = async (draft: boolean) => {
+    if (!project || !prompt.trim() || busy) return;
     setBusy(true);
     try {
-      await client.createTask(Number(project), prompt.trim(), true); // 存草稿，不自动执行
+      await client.createTask(Number(project), prompt.trim(), draft);
       setPrompt('');
       setOpen(false);
       props.onCreated();
@@ -503,10 +573,10 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
   };
 
   if (!open) {
-    return <button className="new-task" onClick={() => setOpen(true)}>＋ 新建任务（存草稿）</button>;
+    return <button className="new-task" disabled={!props.projects.length} onClick={() => setOpen(true)}>＋ 新建任务</button>;
   }
   return (
-    <Modal title="📝 新建任务（存草稿）" onClose={() => setOpen(false)} width={560}>
+    <Modal title="📝 新建任务" onClose={() => setOpen(false)} width={560}>
       <Labeled label="项目">
         <select value={project} onChange={e => setProject(e.target.value)}>
           {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -514,12 +584,15 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
       </Labeled>
       <Labeled label="任务描述">
         <textarea
-          placeholder="保存后进入草稿队列，点「执行」才运行"
+          placeholder="描述要执行的任务"
           value={prompt} onChange={e => setPrompt(e.target.value)} rows={4}
         />
       </Labeled>
-      <FormActions primary={busy ? '保存中…' : '存草稿'} onPrimary={() => void submit()}
-        disabled={busy || !prompt.trim()} secondary="取消" onSecondary={() => setOpen(false)} />
+      <div className="row">
+        <button className="primary" disabled={busy || !project || !prompt.trim()} onClick={() => void submit(false)}>立即执行</button>
+        <button disabled={busy || !project || !prompt.trim()} onClick={() => void submit(true)}>存草稿</button>
+        <button onClick={() => setOpen(false)}>取消</button>
+      </div>
     </Modal>
   );
 }

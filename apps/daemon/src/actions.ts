@@ -1,327 +1,170 @@
-/**
- * 任务动作的统一入口 —— HTTP API、钉钉 Stream、未来 GUI 全走这里。
- * 保证任何入口对任务状态机的操作语义完全一致。
- *
- * message 约定：钉钉 markdown 子集（不支持 HTML）。换行必须
- * "行尾两空格 + \n"（钉钉渲染换行的唯一可靠方式），统一走 md() 构造。
- */
-import type { FeedbackAction } from '@agentdesk/core';
+/** HTTP API 和钉钉共用的任务动作。 */
+import { parseResultMarker, stripAgentctlLines } from '@agentdesk/core';
+import type { FeedbackAction, RunSummary, Task, TaskStatus } from '@agentdesk/core';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
 
-/** 钉钉 markdown 换行：行尾两空格 + \n */
-const br = (line = '') => line + '  \n';
+const STATUS: Record<TaskStatus, string> = {
+  draft: '草稿', queued: '排队', running: '运行中', blocked: '阻塞',
+  done: '完成', failed: '失败', cancelled: '已取消',
+};
+const taskStatus = (task: Task) => task.status === 'done' && task.partial_remaining ? '部分完成' : STATUS[task.status];
 
-/** 状态徽章：给任务状态一个一眼可读的样式 */
-function badge(status: string): string {
-  const map: Record<string, string> = {
-    queued: '🕐 排队', running: '🔄 运行中', blocked: '⚠️ 阻塞',
-    done: '✅ 完成', failed: '❌ 失败', cancelled: '🚫 取消',
-  };
-  return map[status] ?? status;
-}
-
-/** 截断一行文本 */
-const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s);
-
-/** 解析 "run [项目名] 描述" —— 项目名不含空格；首词若匹配已注册项目名则为项目 */
-function parseRunCommand(
-  raw: string,
-  store: Store,
-): { type: 'run'; projectId?: number; prompt: string } | null {
-  const s = raw.trim().replace(/^@\S+\s*/, '');
-  const m = s.match(/^(?:run|派任务|执行)\s+(.+)$/i);
-  if (!m) return null;
-  const rest = m[1]!.trim();
-  const firstSpace = rest.indexOf(' ');
-  if (firstSpace < 0) return { type: 'run', prompt: rest }; // 只有描述，无项目词
-  const maybeProject = rest.slice(0, firstSpace);
-  const project = store.findProject(maybeProject);
-  if (project) return { type: 'run', projectId: project.id, prompt: rest.slice(firstSpace + 1).trim() };
-  return { type: 'run', prompt: rest };
-}
+const HELP = [
+  '### 🤖 agentdesk 指令',
+  '- `状态 [编号]` / `status [编号]` · 看队列或单个任务',
+  '- `项目` / `projects` · 查看可派单的项目',
+  '- `执行 [项目] <描述>` / `run [项目] <描述>` · 派发新任务',
+  '- `草稿 [项目] <描述>` / `draft [项目] <描述>` · 保存草稿',
+  '- `执行 55` / `run 55` · 启动草稿',
+  '- `继续 55 [说明]` / `resume 55 [说明]` · 续跑阻塞或部分完成的任务',
+  '- `重试 55` / `retry 55` · 失败后重新执行',
+  '- `取消 55` / `cancel 55` · 取消草稿、排队或阻塞任务',
+  '- `帮助` / `help` · 显示指令',
+  '',
+  '只有一个项目时可以省略项目名。任务编号可以写 `55` 或 `#55`，也可以写 `55 继续` 或 `55 取消`。',
+].join('  \n');
 
 export async function applyTaskAction(
   store: Store,
   scheduler: Scheduler,
   action: FeedbackAction,
+  origin: 'api' | 'dingtalk' = 'api',
 ): Promise<{ ok: boolean; message: string }> {
-  /** 项目名速查（多项目并行时每条消息必须可辨识归属） */
   const projectName = (id: number) => store.getProject(id)?.name ?? `项目#${id}`;
+  const fail = (message: string) => ({ ok: false, message });
+  const reply = (message: string) => ({ ok: true, message });
+  const id = action.taskId;
 
-  if (action.type === 'status') {
-    // 摘要卡片：钉钉群聊气泡对 markdown 渲染有 ~12 行折叠限制，超长必截断。
-    // 所以 status 只给 ≤8 行的计数摘要；完整列表走「详情」指令按需拉取。
-    const all = store.listTasks();
-    const blocked = store.listTasks('blocked');
-    const running = all.filter(t => t.status === 'running');
-    const done = all.filter(t => t.status === 'done').length;
-
-    let md = br('### 📋 agentdesk 队列');
-    if (blocked.length) {
-      // 多项目：阻塞行带项目名（如 "#16(web-cad)"），批复时可精准定位
-      md += br(`⚠️ **阻塞 ${blocked.length}**：` +
-        blocked.map(t => `#${t.id}(${projectName(t.project_id)})`).join('、'));
-    }
-    md += br(`🔄 ${running.length ? '进行中 ' + running.length : '空闲'}` +
-      (done ? ` · 已完成 ${done}` : ''));
-    if (blocked.length) md += br('> 回复 `resume <id> <决定>` 续跑 · `详情` 看完整列表');
-    return { ok: true, message: md };
-  }
-
+  if (action.type === 'help') return reply(HELP);
   if (action.type === 'projects') {
-    const all = store.listProjects();
-    if (!all.length) return { ok: true, message: br('📭 尚未注册任何项目') + br() + br('机器上：`desk project add <名> <路径>`') };
-    let md = br(`### 📁 项目（${all.length}）`);
-    for (const p of all) {
-      md += br(`- **${p.name}** \`${p.workspace_path}\`${p.agent_id !== 'codex' ? ' · agent: ' + p.agent_id : ''}`);
-    }
-    md += br() + br('> 派任务：`run <项目名> <描述>`');
-    return { ok: true, message: md };
+    const projects = store.listProjects();
+    if (!projects.length) return reply('尚未注册项目。');
+    return reply([
+      '### 📁 项目',
+      ...projects.map(project => `- ${project.name}`),
+      '',
+      '派单示例 `执行 项目名 给登录接口加限流`',
+    ].join('\n'));
   }
 
-  if (action.type === 'detail') {
-    // 详情列表：两行式（编号行 + 描述行）。实测钉钉手机一行约可容纳 24-26 个
-    // 中文字符（#15 的 20 字完整显示），故描述限 40 字——绝大多数完整，超长才截。
-    const all = store.listTasks().slice(0, 6);
-    let md = br('### 📋 任务列表（最新 6 条）');
-    for (const t of all) {
-      const partialBadge = t.partial_remaining ? ' ⚠️部分' : '';
-      md += br() + br(`${badge(t.status)}${partialBadge} **#${t.id}** \`${projectName(t.project_id)}\``);
-      md += br(`　${cut(t.prompt, 40)}`);
-      if (t.partial_remaining) md += br(`　📋 未完成: ${cut(t.partial_remaining, 36)}`);
+  if (action.type === 'status' || action.type === 'detail') {
+    if (id === undefined) {
+      const queued = store.listTasks('queued');
+      const running = store.listTasks('running');
+      const blocked = store.listTasks('blocked');
+      const recent = store.listTasks().slice(0, 6);
+      return reply([
+        '### 📋 队列状态',
+        `排队 ${queued.length} · 运行中 ${running.length} · 阻塞 ${blocked.length}`,
+        blocked.length ? '待处理 ' + blocked.map(t => `#${t.id}（${projectName(t.project_id)}）`).join('、') : '',
+        recent.length ? [
+          '**近期任务**',
+          ...recent.map(t => `- **#${t.id}** ${projectName(t.project_id)} · ${taskStatus(t)}`),
+        ].join('\n') : '',
+        '用 `状态 55` 查看指定任务。',
+      ].filter(Boolean).join('\n\n'));
     }
-    md += br() + br('> `run <id> 继续`（部分完成续跑）/ `retry <id>` / `cancel <id>` · 更多任务上 Web 看板');
-    return { ok: true, message: md };
+    const task = store.getTask(id);
+    if (!task) return fail(`任务 #${id} 不存在。`);
+    const run = store.runsOfTask(id).at(-1);
+    let summary: RunSummary | undefined;
+    if (run?.summary_json) {
+      try { summary = JSON.parse(run.summary_json) as RunSummary; } catch { /* 旧运行记录可能无有效摘要 */ }
+    }
+    const rawSummary = summary?.agentMessage ?? '';
+    const result = stripAgentctlLines(rawSummary).trim() || parseResultMarker(rawSummary)?.summary;
+    const merge = store.getMerge(id);
+    const reason = task.status === 'blocked' || task.status === 'failed' ? run?.blocked_kind : undefined;
+    return reply([
+      `### 📋 任务 #${id} · ${projectName(task.project_id)}`,
+      `**${taskStatus(task)}**${reason ? ` · ${reason}` : ''}`,
+      `**任务描述**\n\n${task.prompt}`,
+      result ? `**最近一次运行**\n\n${result}` : '',
+      task.partial_remaining ? `**未完成事项**\n\n${task.partial_remaining}` : '',
+      merge?.state.repo && merge.state.pr ? `[查看 PR](https://github.com/${merge.state.repo}/pull/${merge.state.pr})` : '',
+      !merge && (task.status === 'blocked' || (task.status === 'done' && task.partial_remaining)) ? `续跑 \`继续 ${id}\`` : '',
+    ].filter(Boolean).join('\n\n'));
   }
 
-  if (action.type === 'draft') {
-    // 建草稿（不执行）：draft [项目名] <描述>；Web/钉钉均以 draft 为唯一创建入口
-    const all = store.listProjects();
-    if (!all.length) return { ok: false, message: '尚未注册任何项目（先在机器上 desk project add）' };
-    let projectId = action.projectId;
-    let prompt = action.prompt ?? '';
-    if (all.length > 1 && !projectId) {
-      const firstWord = prompt.split(/\s+/)[0] ?? '';
-      const hit = store.findProject(firstWord);
-      if (hit) {
-        projectId = hit.id;
-        prompt = prompt.slice(firstWord.length).trim();
-      }
+  if (action.type === 'draft' || (action.type === 'run' && id === undefined)) {
+    const draft = action.type === 'draft';
+    const command = draft ? '草稿' : '执行';
+    const projects = store.listProjects();
+    if (!projects.length) return fail('尚未注册项目。');
+    let prompt = action.prompt?.trim() ?? '';
+    const firstWord = prompt.split(/\s+/)[0] ?? '';
+    const namedProject = action.projectId === undefined ? store.findProject(firstWord) : undefined;
+    if (namedProject) prompt = prompt.slice(firstWord.length).trim();
+    const project = action.projectId !== undefined ? store.getProject(action.projectId)
+      : namedProject ?? (projects.length === 1 ? projects[0] : undefined);
+    if (!project) {
+      return fail(`请指定项目 \`${command} <项目> <描述>\`。可用项目 ${projects.map(p => p.name).join('、')}。`);
     }
-    if (!projectId && all.length === 1) projectId = all[0]!.id;
-    if (!projectId) {
-      return {
-        ok: false,
-        message: br('**有多个项目，请带项目名：**') + br() +
-          all.map(p => br(`- \`draft ${p.name} <描述>\``)).join(''),
-      };
-    }
-    const project = store.getProject(projectId);
-    if (!project) return { ok: false, message: '项目不存在' };
-    if (!prompt.trim()) return { ok: false, message: '任务描述不能为空：`draft <项目> <描述>`' };
-    const t = store.addTask(project.id, prompt, { draft: true });
-    return {
-      ok: true,
-      message: br('### 📝 草稿已创建') +
-        br() +
-        br(`**#${t.id}** → 项目 \`${project.name}\``) +
-        br(cut(prompt, 60)) +
-        br() +
-        br(`执行：\`run ${t.id}\`（Web 草稿队列也可编辑后再执行）`),
-    };
+    if (!prompt) return fail(`请输入任务描述 \`${command} ${project.name} <描述>\`。`);
+    const task = store.addTask(project.id, prompt, { draft });
+    if (!draft) scheduler.tickNow();
+    return reply([
+      `### ${draft ? '📝 草稿已创建' : '📋 任务已入队'}`,
+      `**#${task.id}** · ${project.name}`,
+      prompt,
+      draft ? `启动草稿 \`执行 ${task.id}\`` : `查看状态 \`状态 ${task.id}\``,
+    ].join('\n\n'));
   }
 
-  if (action.type === 'run') {
-    // run = 执行动作（不创建）：三种形态
-    //   run <数字>            执行草稿/已存在任务 #数字（可 resume blocked、可入队 draft）
-    //   run <数字> <补充文字>   同上，并把补充文字合入任务描述
-    //   run [项目名] <描述>    全新任务，直接入队执行
-    const all = store.listProjects();
-    const raw = action.prompt ?? '';
-    let projectId = action.projectId;
-    let prompt = raw;
-    let refId: number | undefined;
-
-    // 形态判定：首 token 是纯数字 → 任务引用
-    const numMatch = raw.match(/^#?(\d+)\s*([\s\S]*)$/);
-    if (numMatch) {
-      refId = Number(numMatch[1]);
-      prompt = numMatch[2]!.trim();
-    } else if (all.length > 1) {
-      const firstWord = raw.split(/\s+/)[0] ?? '';
-      const hit = store.findProject(firstWord);
-      if (hit) {
-        projectId = hit.id;
-        prompt = raw.slice(firstWord.length).trim();
-      }
-    }
-    if (!projectId && all.length === 1) projectId = all[0]!.id;
-
-    // ── 形态一：引用已有任务（草稿执行 / blocked resume / 其他状态提示）──
-    if (refId !== undefined) {
-      const t = store.getTask(refId);
-      if (!t) return { ok: false, message: `任务 #${refId} 不存在` };
-
-      // 补充文字合入描述（草稿完善 / 给 blocked 任务追加信息）
-      if (prompt && t.prompt !== prompt) {
-        store.updateTaskPrompt(refId, t.prompt + (t.prompt ? '\n' : '') + prompt);
-      }
-
-      if (t.status === 'draft') {
-        store.setTaskStatus(refId, 'queued');
-        scheduler.tickNow();
-        return {
-          ok: true,
-          message: br(`### ▶️ 草稿 #${refId} 已入队执行`) +
-            br() +
-            br(`项目 \`${projectName(t.project_id)}\``) +
-            br(cut(prompt ? t.prompt + '\n+ ' + prompt : t.prompt, 80)) +
-            br() +
-            br('调度器将在数秒内拾取。'),
-        };
-      }
-      if (t.status === 'blocked') {
-        store.setPendingFeedback(refId, prompt || '请继续');
-        store.setTaskStatus(refId, 'queued');
-        scheduler.tickNow();
-        return { ok: true, message: br(`### ✅ #${refId}(${projectName(t.project_id)}) 已带信息重新入队`) };
-      }
-      if (t.status === 'done' && t.partial_remaining) {
-        // 部分完成 → 同会话续跑剩余部分（run 编号 = 继续语义）
-        store.setPendingFeedback(refId, prompt || '请继续完成剩余部分');
-        store.setTaskStatus(refId, 'queued');
-        scheduler.tickNow();
-        return {
-          ok: true,
-          message: br(`### ✅ #${refId}(${projectName(t.project_id)}) 继续执行剩余部分`) +
-            br() +
-            br(`📋 未完成：${cut(t.partial_remaining, 60)}`) +
-            (prompt ? br(`> 补充：${cut(prompt, 60)}`) : '') +
-            br('同一会话上下文续跑。'),
-        };
-      }
-      return { ok: false, message: `#${refId} 当前 ${t.status}（draft 可执行、blocked 可续跑、部分完成可继续；完整重跑用 \`retry ${refId}\`）` };
-    }
-
-    // ── 形态二：全新任务直接入队 ──
-    if (!all.length) return { ok: false, message: '尚未注册任何项目（先在机器上 desk project add）' };
-    if (!projectId) {
-      return {
-        ok: false,
-        message: br('**有多个项目，请带项目名：**') + br() +
-          all.map(p => br(`- \`run ${p.name} <描述>\``)).join(''),
-      };
-    }
-    const project = store.getProject(projectId);
-    if (!project) return { ok: false, message: '项目不存在' };
-    if (!prompt.trim()) return { ok: false, message: '任务描述不能为空：`run <项目> <描述>`' };
-    const newTask = store.addTask(project.id, prompt);
-    scheduler.tickNow();
-    return {
-      ok: true,
-      message: br('### 📋 任务已入队') +
-        br() +
-        br(`**#${newTask.id}** → 项目 \`${project.name}\``) +
-        br(cut(prompt, 60)) +
-        br() +
-        br('调度器将在数秒内拾取执行。'),
-    };
+  if (id === undefined || !Number.isSafeInteger(id) || id <= 0) {
+    return fail('请填写任务编号，例如 `继续 55`。');
   }
-
-  if (action.type === 'help') {
-    const cmd = (en: string, cn: string, args: string, desc: string) =>
-      br(`- \`${en}·${cn}${args ? ' ' + args : ''}\` — ${desc}`);
-    return {
-      ok: true,
-      message:
-        br('### 🤖 agentdesk 指令（中英文均可）') +
-        br() +
-        cmd('draft', '草稿', '[项目] <描述>', '创建草稿（不执行；Web 草稿队列也可创建/编辑）') +
-        cmd('run', '执行', '<编号>', '执行草稿 / 续跑阻塞或部分完成任务（可附补充文字）') +
-        cmd('run', '执行', '[项目] <描述>', '全新任务直接入队执行') +
-        cmd('resume', '继续', '[编号] <决定>', '阻塞任务带决定续跑（仅一个阻塞任务时可省编号）') +
-        cmd('retry', '重试', '<编号>', '重新执行该任务') +
-        cmd('cancel', '取消', '<编号>', '取消任务') +
-        cmd('status', '状态', '', '队列摘要') +
-        cmd('detail', '详情', '', '完整任务列表（含所属项目）') +
-        cmd('projects', '项目', '', '所有已注册项目') +
-        br() +
-        br('💡 编号即归属（每行显示所属项目，按编号操作即精准定位）。' +
-           '支持倒装：「16 取消」「17 继续 完成它」；仅一个阻塞任务时 resume 可省编号。' +
-           '示例：`run myproj 给登录接口加限流`'),
-    };
-  }
-
-  const id = action.taskId ?? -1;
-  let task = store.getTask(id);
-  if (!task && action.type !== 'resume') return { ok: false, message: `任务 #${id ?? '?'} 不存在` };
+  const task = store.getTask(id);
+  if (!task) return fail(`任务 #${id} 不存在。`);
+  const merge = store.getMerge(id);
+  const resumable = task.status === 'blocked' || (task.status === 'done' && !!task.partial_remaining);
+  const title = `**#${id} · ${projectName(task.project_id)}**`;
 
   switch (action.type) {
-    case 'resume': {
-      // 免编号：未指定 id 时指向唯一阻塞任务（v1 串行模式下常态）
-      let rid = action.taskId;
-      if (!rid) {
-        const blocked = store.listTasks('blocked');
-        if (blocked.length === 0) return { ok: false, message: '当前没有阻塞任务（发 status 查看队列）' };
-        if (blocked.length > 1) {
-          let md = br('**当前有多个阻塞任务，请带编号：**') + br();
-          for (const t of blocked) {
-            md += br(`- **#${t.id}**(${projectName(t.project_id)}) ${cut(t.prompt, 30)} → \`resume ${t.id} <决定>\``);
-          }
-          return { ok: false, message: md };
-        }
-        rid = blocked[0]!.id;
-        task = blocked[0]!;
+    case 'run': {
+      if (merge) return fail('自动化合并任务通过 CLI 管理。');
+      if (task.status !== 'draft') {
+        return fail(resumable ? `请用 \`继续 ${id}\` 续跑此任务。`
+          : `任务 #${id} 当前为${STATUS[task.status]}。只有草稿可以用「执行 <编号>」启动。`);
       }
-      if (!task) return { ok: false, message: `任务 #${rid} 不存在` };
-      // 部分完成的 done 任务允许 resume（同会话继续剩余部分）
-      if (task.status === 'done' && task.partial_remaining) {
-        store.setPendingFeedback(rid, action.feedback ?? '请继续完成剩余部分');
-        store.setTaskStatus(rid, 'queued');
-        scheduler.tickNow();
-        return {
-          ok: true,
-          message: br(`### ✅ #${rid}(${projectName(task.project_id)}) 继续执行剩余部分`) +
-            br(`📋 未完成：${cut(task.partial_remaining, 60)}`),
-        };
-      }
-      if (task.status !== 'blocked') {
-        return {
-          ok: false,
-          message: br(`🚫 **#${rid}** 当前 ${badge(task.status)}，无法执行`) +
-            br() +
-            (task.status === 'done' || task.status === 'failed'
-              ? br(`想重跑可回复 \`retry ${rid}\``)
-              : task.status === 'cancelled'
-                ? br('已取消的任务如需重跑：`retry ' + rid + '`')
-                : ''),
-        };
-      }
-      store.setPendingFeedback(rid, action.feedback ?? '请继续');
-      store.setTaskStatus(rid, 'queued');
-      scheduler.tickNow();
-      return {
-        ok: true,
-        message: br(`### ✅ #${rid}(${projectName(task.project_id)}) 已带决定续跑`) +
-          br() +
-          br(`> ${cut(action.feedback ?? '请继续', 60)}`) +
-          br('同一会话上下文，调度器将在数秒内拾取。'),
-      };
-    }
-    case 'retry': {
-      if (!task) return { ok: false, message: `任务 #${id} 不存在` };
-      if (!['failed', 'blocked', 'done'].includes(task.status)) return { ok: false, message: `#${id} 当前 ${task.status}，不可重试` };
-      store.setPendingFeedback(id, null);
+      const extra = action.prompt?.trim();
+      if (extra && extra !== task.prompt) store.updateTaskPrompt(id, task.prompt + '\n' + extra);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return { ok: true, message: br(`### 🔁 #${id}(${projectName(task.project_id)}) 已重新入队`) + br() + br('将作为全新执行开始。') };
+      return reply(`草稿 ${title} 已入队。查看 \`状态 ${id}\`。`);
+    }
+    case 'resume': {
+      if (merge) return fail('自动化合并任务请通过 CLI retry 继续。');
+      if (!resumable) return fail(`任务 #${id} 当前为${STATUS[task.status]}，无法续跑。`);
+      const feedback = action.feedback?.trim() || (task.partial_remaining ? '请继续完成剩余部分' : '请继续');
+      store.setPendingFeedback(id, feedback);
+      store.setTaskStatus(id, 'queued');
+      scheduler.tickNow();
+      return reply(`任务 ${title} 已安排继续。\n\n${feedback}`);
+    }
+    case 'retry': {
+      if (merge && origin === 'dingtalk') return fail('自动化合并任务请通过 CLI retry 继续。');
+      if (origin === 'dingtalk' ? task.status !== 'failed' : !['failed', 'blocked', 'done'].includes(task.status)) {
+        return fail(resumable ? `请用 \`继续 ${id}\` 续跑此任务。`
+          : `任务 #${id} 当前为${STATUS[task.status]}，无法重试。`);
+      }
+      store.setPendingFeedback(id, null);
+      if (merge) store.deferMerge(id, 0);
+      store.setTaskStatus(id, 'queued');
+      scheduler.tickNow();
+      return reply(`任务 ${title} 已重新入队。${merge ? '将核对并继续已有合并进度。' : '将从原指令重新执行。'}`);
     }
     case 'cancel': {
-      if (!task) return { ok: false, message: `任务 #${id} 不存在` };
-      if (task.status === 'running') return { ok: false, message: `#${id} 正在运行，暂不支持在线取消（M2）` };
+      if (merge && origin === 'dingtalk') return fail('自动化合并任务请通过 CLI cancel 取消。');
+      if (task.status === 'running') return fail(`任务 #${id} 正在运行，暂不支持在线取消。`);
+      if (origin === 'dingtalk' && !['draft', 'queued', 'blocked'].includes(task.status)) {
+        return fail(`任务 #${id} 当前为${STATUS[task.status]}，无法取消。`);
+      }
       store.setTaskStatus(id, 'cancelled');
-      return { ok: true, message: br(`### 🚫 #${id}(${projectName(task.project_id)}) 已取消`) };
+      return reply(`任务 ${title} 已取消。`);
     }
+    default:
+      return fail('无法识别该任务动作，发送 `帮助` 查看指令。');
   }
 }

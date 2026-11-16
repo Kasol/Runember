@@ -10,7 +10,21 @@
 
 ## 快速开始
 
-前置：Node 22+ 与 git（必需）；Docker Desktop（或 Engine）——仅**隔离模式**项目需要，纯能力优先项目无需 Docker。
+Windows 用户可使用发布包，解压双击 **Start Agentdesk.cmd**。发布包带 Node 和 Web 看板，首次使用需安装宿主 Git 和 Codex CLI。详见 [Windows 快速上手](docs/windows-quickstart.md)。
+
+源码运行前置为 Node 22+、Git 和宿主 Codex CLI。先按能力优先流程启动。
+
+```bash
+npm ci
+npm run build -w apps/web
+npm run desk -- doctor
+npm run desk -- auth
+npm run desk -- start
+```
+
+已有 Codex 登录时可通过 `doctor` 确认。默认 Web 地址为 `http://127.0.0.1:8787`，可在页面添加 Git 项目。构建 Windows 发布候选包时使用 `npm run release:windows`。
+
+隔离模式另需 Docker。下面是隔离模式与 M0 探针的开发流程。
 
 ```bash
 npm install
@@ -42,8 +56,8 @@ npm run desk -- status 7                          # 看任务详情：每次 run
 ```
 
 - `run` 后任务进入队列，由 daemon 按并发配置自动调度执行（挂完就可以关电脑走人，前提是 daemon 所在机器不睡）
-- 任务在**你注册的真实目录**里直接改文件；每个任务开始前自动做 checkpoint commit（回滚锚点），结束后 `status <id>` 可看 agent 总结与改动清单
-- 约定：agent **不会**主动 `git push`；不满意可 `git reset --hard` 回到 checkpoint
+- 普通任务在注册的目录执行。启动前用临时 Git 索引记录工作树，快照保存在 `refs/agentdesk/checkpoints/`。用 `status <id>` 查看快照 SHA 和改动清单，用 `git diff <快照SHA>` 检查差异。
+- 处于合并、rebase 等 Git 操作中的工作区会阻塞派单。daemon 重启后会检查仍活跃的执行器，普通任务结果未知时标为中断，由你查看日志后决定续跑。
 
 ### 阻塞与反馈
 
@@ -55,15 +69,32 @@ npm run desk -- retry 7                   # 重跑（全新执行）
 npm run desk -- cancel 7                  # 取消（running 状态暂不支持在线取消）
 ```
 
-> 有多个阻塞任务时 `resume` 必须带编号；只有一个时编号可省略。
+> `resume` 需要任务编号，反馈文字可省略。
+
+### 自动化合并 GitHub PR
+
+给 `capability` 项目派合并任务前，把要发布的改动提交到源分支。用 daemon 的运行账号安装并登录 GitHub CLI，验证 `gh auth status --hostname github.com`、`gh pr list --repo OWNER/REPO` 和 `git ls-remote origin`。同一账号还需要能为 `origin` 推送分支。daemon 支持通过 PATH、`AGENTDESK_GH_PATH` 指定的路径或仓库内 `data/tools/gh.exe` 找到 `gh`。
+
+宿主 GitHub HTTPS 流量需要代理时，在启动 daemon 的环境里设置 `AGENTDESK_MERGE_HTTPS_PROXY`。交互登录 `gh` 时使用同一个代理地址作为 `HTTPS_PROXY`。
+
+```bash
+npm run desk -- merge myapp --source feature_from_main_dev --base main --test "npm ci && npm test"
+npm run desk -- status 7
+npm run desk -- retry 7
+```
+
+将测试命令换成目标仓库的全量测试命令，包含独立工作树需要的依赖安装。daemon 在独立工作树 rebase 和测试，随后推送任务专用分支，创建或复用 GitHub PR，并对已验证的 head 执行 Rebase 合并。等待 CI 时任务保留在队列，约 30 秒后复查。远端 base 前移会触发重新 rebase 和测试。仓库必须允许 Rebase 合并，流程受必需检查、审批及合并队列规则约束。
+
+冲突时，状态和运行日志会提供独立工作树路径。按项目约定解决冲突，在该路径完成 `git rebase --continue` 后，用 `retry` 继续。完成后会清理任务专用分支和工作树。需要同时退役源分支时，在派单时加 `--retire-dev`。源分支已前移或本地仍被检出时，会保留对应分支。自动化合并任务通过 CLI/API 管理，钉钉可接收状态通知。远程 API 操作需要配置 token。
 
 ### 认证
 
 ```bash
-npm run desk -- auth codex     # 设备码登录（终端出码 → 浏览器授权 → 凭证写入共享卷）
+npm run desk -- auth                # 能力优先，登录本机 Codex
+npm run desk -- auth --isolation    # 隔离模式，登录共享容器卷
 ```
 
-凭证存在 `agentdesk-codex-home` 卷中，所有任务容器共享；token 过期会触发 `auth_missing` 阻塞，重跑本命令即可。
+宿主任务使用当前系统账号的 Codex 登录。隔离模式凭证写入 `agentdesk-codex-home` 卷。
 
 ### 通知通路自检
 
@@ -80,18 +111,24 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 ```json
 {
   "notify": {
-    "channels": [{ "type": "dingtalk-app", "events": ["blocked", "failed"] }]
+    "channels": [{
+      "type": "dingtalk-app",
+      "conversationId": "主动推送的目标群 ID",
+      "events": ["blocked", "failed"]
+    }]
   },
   "feedback": {
     "dingtalkStream": {
       "clientId": "应用的 Client ID（AppKey）",
-      "clientSecret": "应用的 Client Secret（AppSecret）"
+      "clientSecret": "应用的 Client Secret（AppSecret）",
+      "allowedSenderIds": ["获准操作的钉钉 senderStaffId 或 senderId"],
+      "allowedConversationIds": ["获准发指令的会话 ID"]
     }
   }
 }
 ```
 
-重启 daemon 生效。之后任务阻塞时群里会收到问题原文，直接在群里 `@机器人 resume 你的决定` 即可完成反馈——全程手机操作，通道纯出站（零公网暴露、零内网穿透）。
+重启 daemon 生效。普通任务阻塞时，群里会收到问题和任务编号。可在群里发 `@机器人 继续 7 你的决定`。
 
 **极简方案**（只要通知不要反馈）：群里添加"自定义"webhook 机器人（安全设置选**加签**），配置改为：
 
@@ -108,13 +145,17 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 }
 ```
 
-群内指令语法（Stream 模式）：`resume/继续 [id] <决定>`、`retry/重试 <id>`、`cancel/取消 <id>`、`status/状态`、`帮助`。首次使用需 @ 机器人任意发言一次以激活该群的主动推送（daemon 自动学习并持久化群标识）。
+群内指令以 `@机器人 帮助` 为准。发送者和会话都要命中授权列表。主动通知使用渠道上显式设置的 `conversationId`。
+
+首次配置时，在宿主机生成一段 16 位随机十六进制文本，让待授权用户在指定群里发 `@机器人 agentdesk-pair <随机文本>`。在 daemon 本机日志里核对这段文本的 SHA-256 对应的「本机授权核对」，将其中的 `sender` 和 `conversation` 填入授权列表，重启生效。
 
 ## 配置分层
 
 优先级从低到高：代码默认值 → `~/.agentdesk/config.json` → 环境变量 `AGENTDESK_节__键`（如 `AGENTDESK_SCHEDULER__CONCURRENCY=2`）→ CLI 参数。
 
 常用项：`scheduler.concurrency`（全局并发，v1 默认 1）、`scheduler.taskTimeoutMin`（单任务超时）、`agents.*.image`（执行镜像）、`proxy.httpsProxy`（容器内代理，如 `http://host.docker.internal:7897`）、`server.token`（API 鉴权）。
+
+宿主 Codex 和容器代理可以分别设置。用 `AGENTDESK_PROXY__NATIVEHTTPSPROXY` 或 `proxy.nativeHttpsProxy` 配置宿主 HTTPS 代理，HTTP 对应 `nativeHttpProxy`。
 
 ## 里程碑
 
@@ -131,7 +172,7 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 
 | 字段 | 说明 |
 |---|---|
-| `execution` | `'docker'`（默认，容器隔离）/ `'native'`（codex 直接跑宿主，原生速度零播种；⚠️ agent 以你的用户身份操作本机） |
+| `execution` | `'capability'`（默认，Codex 以当前用户身份运行）或 `'isolation'`（Linux 容器） |
 | `extraPackages` | 项目级系统依赖（如 `["resvg"]`）→ daemon 预装进项目专属镜像（`curl` 实战验证） |
 | `mcpServers` | 声明任务需要的 MCP server 名 → 渲染进容器内 codex config.toml（需先在 `~/.agentdesk/config.json` 的 `agents.codex.mcp` 登记地址；未登记的声明会被跳过并告警） |
 
@@ -142,52 +183,35 @@ npm run desk -- notify-test    # 向所有已配置的钉钉渠道发测试消�
 - **契约环境规则**：agent 被告知系统级依赖装不了就精确上报一次（附安装方式），不反复重试
 - **注册时自动配置**：项目仓库自动设 `core.filemode=false`（跨容器权限位噪音根治）；宿主未装 git 拒绝注册并提示
 
-环境自检：`npm run desk -- doctor`（Docker / git / 镜像 / 凭证 / skills 五项）
+环境自检用 `npm run desk -- doctor`。隔离模式追加 `--isolation`，自动化合并额外检查追加 `--merge`。
 
 ## Web 看板使用手册
 
-### 启动与访问
+Windows 发布包双击 **Start Agentdesk.cmd** 即可。源码开发时先构建 Web，再运行 `npm run desk -- start`。默认地址为 `http://127.0.0.1:8787`。顶部可以添加项目和查看宿主环境检查。
 
-先完成「快速开始」中的依赖安装、runner 镜像构建与 Codex 认证。在项目根目录打开两个终端：
+1. **派发任务**。点「新建任务」，选择项目并填写描述，然后选择「立即执行」或「存草稿」。
+2. **查看进度**。看板约每 3 秒刷新，分开显示草稿、进行中、阻塞、完成、失败、取消。排队任务可取消。
+3. **查看详情**。卡片或 `?task=<编号>` 可打开详情，查看总结、运行历史、checkpoint、日志尾部以及合并任务的 PR。
+4. **处理阻塞**。普通任务可带决定续跑。合并任务可核对并继续已有合并进度。
+5. **失败重试**。点击失败任务卡片上的「重试」重新运行。
 
-```bash
-# 终端 1：启动后端，保持运行；已启动则无需重复执行
-npm run daemon -- --data-dir ./data/agentdesk
+关闭浏览器后 daemon 会继续执行队列。执行期间需保持 daemon 和宿主机运行。隔离模式还需要 Docker。
 
-# 终端 2：首次使用先注册要操作的项目（替换为实际的 git 仓库绝对路径）
-npm run desk -- project add myapp /absolute/path/to/myapp
+启用 `server.token` 后，在看板输入连接密钥。CLI 默认读取同一配置，也可用 `AGENTDESK_TOKEN` 指定。启动或连接失败时用 `desk logs` 查看 daemon 最近日志。
 
-# 启动 Web 开发服务器，保持运行
-npm run web
-```
-
-浏览器打开 http://localhost:5173，顶部显示「daemon 已连接」即可使用。若 5173 已被占用，以 Vite 终端输出的实际地址为准。Windows 项目路径可写为 `D:/work/myapp`；已注册的项目无需重复添加，当前页面不提供项目注册入口。
-
-### 页面操作
-
-1. **派发任务**：点击「＋ 派发任务」，选择项目、填写任务描述，再点击「入队」。任务由 daemon 自动调度，在所选项目的真实目录中执行。
-2. **查看进度**：看板每 3 秒刷新一次。「阻塞」列展示等待处理的任务，「进行中」列包含排队和运行中的任务，「最近」列展示最近 12 条已完成、失败或取消的任务。
-3. **查看详情**：点击任务卡片，查看任务描述、最新 run 的 agent 总结与改动文件概览、Run 历史及最新 run 的日志末尾（最多显示 40 行，每 3 秒刷新）。点击右上角「✕」或弹层外部关闭详情。
-4. **处理阻塞**：在详情中填写决定，点击「带决定续跑」，即可在同一会话上下文中继续。留空或点击阻塞卡片上的「继续」会发送「请继续」；需要明确批复时请填写决定。阻塞任务也可在详情中点击「取消任务」。
-5. **失败重试**：点击失败任务卡片上的「重试」，发起一次全新执行。运行中的任务暂不支持页面取消。
-
-关闭浏览器或 Web 开发服务器后，daemon 仍可继续执行队列；执行期间需保持 daemon 和 Docker 运行，且宿主机不休眠。
-
-### 连接配置与排查
-
-- 默认由 Vite 将 `/api` 请求代理到 `http://127.0.0.1:8787`，本机默认配置无需额外设置。若修改 daemon 的监听端口，需同步调整 `apps/web/vite.config.ts` 中的代理目标，并重启 Web 开发服务器。
-- 页面显示「daemon 离线」时，检查错误横幅、daemon 是否运行，以及代理目标是否与 daemon 地址一致；该提示也可能由 API 请求失败引起。
-- 项目下拉框为空时，先通过上面的 `project add` 命令注册项目，等待页面下次刷新后再派单。
-- 当前 Web 客户端未提供 token 输入，也不会发送 `x-agentdesk-token` 请求头；启用 `server.token` 后，默认 Web 请求会返回 401。此时可通过 `AGENTDESK_TOKEN` 环境变量为 CLI 提供对应 token，或自行接入能为 API 请求附加该请求头的代理。
-
-当前 `npm run web` 启动的是 Vite 开发服务器。可运行 `npm run build -w apps/web` 构建静态资源（输出到 `apps/web/dist`）；daemon 不负责托管这些文件，部署时需另行配置静态文件服务及 `/api` 反向代理。
+开发 Web 源码时可以单独运行 `npm run web`。开发服务器的 `/api` 代理默认指向 `127.0.0.1:8787`，使用其他端口时同步调整 `apps/web/vite.config.ts`。
 
 ## 手机派单（钉钉群）
 
 ```
-@agentdesk run <项目名> <任务描述>
-@agentdesk run 给登录接口加限流        ← 仅一个项目时项目名可省
+@agentdesk 执行 <项目名> <任务描述>
+@agentdesk 草稿 <项目名> <任务描述>
+@agentdesk 执行 55
+@agentdesk 继续 55 可以合并，今晚不部署
+@agentdesk 状态 55
 ```
+
+只有一个项目时可省略项目名。编号支持 `55`、`#55`，也可写 `55 继续` 或 `55 取消`。`状态` 查看队列，`状态 55` 查看单条任务，`详情` 等旧查询入口也会转到「状态」。
 
 ## 目录
 

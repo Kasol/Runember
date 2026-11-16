@@ -1,86 +1,86 @@
-/**
- * doctor —— 开箱自检：五项环境依赖一键体检。
- * 用法: npm run desk -- doctor
- */
-import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+/** 环境检查由 CLI 和本机 Web 共用，按执行模式选择依赖。 */
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { statSync } from 'node:fs';
+import type { ExecutionMode } from '@agentdesk/core';
+import { loadConfig, type AppConfig } from './config.js';
 import { hostGitAvailable } from './hostgit.js';
+import { findHostCodex, hostCodexLoginStatus, hostCodexProxyEnv, runNative } from './native.js';
+import { ghExecutable } from './merge.js';
 
 export interface DoctorRow { name: string; ok: boolean; detail: string; required: boolean }
 
-export async function runDoctor(): Promise<DoctorRow[]> {
+const exec = promisify(execFile);
+
+export async function runDoctor(
+  cfg: AppConfig = loadConfig(),
+  options: { mode?: ExecutionMode; projectPath?: string; merge?: boolean } = {},
+): Promise<DoctorRow[]> {
   const rows: DoctorRow[] = [];
-  const check = async (name: string, required: boolean, fn: () => Promise<{ ok: boolean; detail: string }>) => {
-    const r = await fn();
-    rows.push({ name, ok: r.ok, detail: r.detail, required });
+  const check = async (name: string, required: boolean, fn: () => Promise<string>, failure: string) => {
+    try { rows.push({ name, ok: true, detail: await fn(), required }); }
+    catch { rows.push({ name, ok: false, detail: failure, required }); }
   };
+  const run = async (cmd: string, args: string[]) => (await exec(cmd, args, { timeout: 6_000, windowsHide: true })).stdout.trim();
+  const git = await hostGitAvailable();
+  rows.push({ name: '宿主 Git', ok: git.ok, detail: git.ok ? git.version : '请安装 Git 并将其加入 PATH。', required: true });
 
-  await check('Docker 引擎', true, async () => {
-    try {
-      const r = await fetch('http://localhost:8787/api/agents', { signal: AbortSignal.timeout(3000) });
-      return r.ok
-        ? { ok: true, detail: 'daemon 可达（容器执行已就绪）' }
-        : { ok: false, detail: 'daemon 返回异常' };
-    } catch {
-      // daemon 不在时退回检查 docker CLI
-      return { ok: false, detail: 'daemon 未运行（npm run daemon）——启动后此项自动通过' };
+  if (options.mode === 'isolation') {
+    await check('Docker 引擎', true, () => run('docker', ['version', '--format', '{{.Server.Version}}']), '请启动 Docker 并检查当前账号的访问权限。');
+    await check('Runner 镜像', true,
+      () => run('docker', ['image', 'inspect', cfg.agents.codex!.image, '--format', '{{.Id}}']),
+      '请先准备隔离模式的 Runner 镜像。');
+    await check('容器 Codex 凭证', true, async () => {
+      await run('docker', ['run', '--rm', '--pull=never', '-v',
+        cfg.agents.codex!.codexHomeVolume + ':/codex-home:ro', '--entrypoint', '/bin/sh',
+        cfg.agents.codex!.image, '-c', 'test -f /codex-home/auth.json']);
+      return '容器卷里已有凭证。';
+    }, '请运行 desk auth --isolation。');
+  } else {
+    const codex = findHostCodex();
+    rows.push({ name: '宿主 Codex CLI', ok: !!codex, required: true,
+      detail: codex ?? '请安装官方 Codex CLI，或通过 AGENTDESK_CODEX_PATH 指定可执行文件。' });
+    if (codex) {
+      await check('宿主 Codex 登录', true, async () => {
+        const result = await hostCodexLoginStatus(codex, cfg.proxy);
+        if (result.exitCode !== 0) throw new Error('Codex login status failed');
+        return '当前运行账号已登录。';
+      }, '用当前系统账号运行 desk auth。');
+      await check('Codex 版本', false, async () => {
+        const result = await runNative({ cmd: [codex, '--version'], cwd: process.cwd(),
+          env: hostCodexProxyEnv(cfg.proxy), timeoutMs: 6_000 });
+        if (result.exitCode !== 0) throw new Error('Codex --version failed');
+        return result.out.join(' ');
+      }, '无法查询宿主 Codex 版本。');
     }
-  });
+  }
 
-  await check('宿主 git', true, async () => {
-    const g = await hostGitAvailable();
-    return { ok: g.ok, detail: g.ok ? g.version : '未安装——checkpoint 安全网依赖它' };
-  });
-
-  await check('Runner 镜像 (agentdesk/runner-codex:m0)', true, async () => {
-    const p = promisifyExec(execFile);
-    try {
-      await p('docker', ['image', 'inspect', 'agentdesk/runner-codex:m0'], { timeout: 8000 });
-      return { ok: true, detail: '已构建' };
-    } catch {
-      return { ok: false, detail: '未构建——先跑 npm run m0:offline' };
-    }
-  });
-
-  await check('Codex 凭证（codex-home 卷）', true, async () => {
-    const p = promisifyExec(execFile);
-    try {
-      await p('docker', ['run', '--rm', '-v', 'agentdesk-codex-home:/h', 'alpine:latest', 'sh', '-c', 'test -f /h/auth.json'], { timeout: 20000 });
-      return { ok: true, detail: 'auth.json 存在' };
-    } catch {
-      return { ok: false, detail: '未登录——跑 npm run m0:login 或 desk auth codex' };
-    }
-  });
-
-  await check('宿主 skills 目录（可选继承）', false, async () => {
-    const dir = join(homedir(), '.codex', 'skills');
-    if (!existsSync(dir)) return { ok: true, detail: '不存在（无 skills 可继承，非问题）' };
-    const n = readdirSync(dir).length;
-    return { ok: true, detail: `${n} 个 skills 将在每次任务前播种进容器` };
-  });
-
+  if (options.projectPath) {
+    const path = options.projectPath;
+    await check('项目目录', true, async () => {
+      if (!statSync(path).isDirectory()) throw new Error('Not a directory');
+      return path;
+    }, '路径不存在或当前账号无法访问。');
+    await check('Git 工作区', true, () => run('git', ['-C', path, 'rev-parse', '--show-toplevel']), '请选择可访问的本机 Git 工作区。');
+    await check('Git 提交身份', true, async () => {
+      await run('git', ['-C', path, 'var', 'GIT_AUTHOR_IDENT']);
+      await run('git', ['-C', path, 'var', 'GIT_COMMITTER_IDENT']);
+      return '已配置。';
+    }, '请给该仓库配置 Git 的 user.name 和 user.email。');
+  }
+  if (options.merge) {
+    await check('GitHub CLI（自动化合并）', true, async () => {
+      await run(ghExecutable(), ['auth', 'status', '--hostname', 'github.com']);
+      return '当前账号已登录。';
+    }, '请安装 GitHub CLI，再运行 gh auth login。');
+  }
   return rows;
-}
-
-function promisifyExec(execFile: typeof import('node:child_process').execFile) {
-  return Object.assign(
-    (cmd: string, args: string[], opts: { timeout: number }) =>
-      new Promise<void>((resolve, reject) => {
-        execFile(cmd, args, { ...opts, windowsHide: true }, (err) => err ? reject(err) : resolve());
-      }),
-  );
 }
 
 export function printDoctor(rows: DoctorRow[]): number {
   console.log('\n🩺 agentdesk doctor');
-  let fail = 0;
-  for (const r of rows) {
-    const icon = r.ok ? '✅' : (r.required ? '❌' : '⚠️ ');
-    if (!r.ok && r.required) fail++;
-    console.log(`${icon} ${r.name} — ${r.detail}`);
-  }
-  console.log(fail === 0 ? '\n全部必需项通过 ✅' : `\n${fail} 项必需检查未通过`);
-  return fail === 0 ? 0 : 1;
+  for (const row of rows) console.log(`${row.ok ? '✅' : row.required ? '❌' : '⚠️ '} ${row.name} — ${row.detail}`);
+  if (rows.some(row => row.required && !row.ok)) return 1;
+  console.log('\n通过环境检查。可以派一条只读任务验证模型连接。');
+  return 0;
 }

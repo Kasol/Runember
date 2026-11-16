@@ -1,45 +1,43 @@
 /** 前端共享类型与 API 客户端（与 daemon REST 一一对应） */
 
-export type TaskStatus = 'draft' | 'queued' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
+import type { Project, Task, Run, TaskStatus } from '@agentdesk/core';
+export type { Project, Task, Run } from '@agentdesk/core';
 
-export interface Project {
-  id: number; name: string; workspace_path: string;
-  agent_id: string; created_at: string;
+export interface MergeStatus {
+  repo?: string;
+  pr?: number;
+  verified?: { base: string; head: string };
+  completed?: string;
 }
-export interface Task {
-  id: number; project_id: number; prompt: string;
-  status: TaskStatus; pending_feedback: string | null;
-  draft_order?: number | null;
-  /** 部分完成：agent 自报的未完成清单（非空 = partial） */
-  partial_remaining?: string | null;
-  created_at: string;
+
+export class ApiError extends Error {
+  constructor(public status: number, message: string) { super(message); }
 }
-export interface Run {
-  id: number; task_id: number; kind: 'normal' | 'resume';
-  session_id?: string; status: string; exit_code?: number;
-  blocked_kind?: string; log_path?: string; summary_json?: string;
-  started_at?: string; ended_at?: string;
-}
+
+const tokenKey = 'agentdesk.api-token';
+export function setApiToken(token: string): void { sessionStorage.setItem(tokenKey, token); }
 
 async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const token = sessionStorage.getItem(tokenKey);
   const res = await fetch(path, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : undefined,
+    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(token ? { 'x-agentdesk-token': token } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error ?? `HTTP ${res.status}`);
   return data as T;
 }
 
 export const client = {
   projects: () => api<{ projects: Project[] }>('GET', '/api/projects'),
   tasks: () => api<{ tasks: Task[] }>('GET', '/api/tasks'),
-  task: (id: number) => api<{ task: Task; runs: Run[] }>('GET', `/api/tasks/${id}`),
+  task: (id: number) => api<{ task: Task; runs: Run[]; merge?: MergeStatus }>('GET', `/api/tasks/${id}`),
   run: (id: number) => api<{ run: Run; logTail: string[] }>('GET', `/api/runs/${id}`),
   createTask: (project: string | number, prompt: string, draft = false) =>
     api<{ task: Task }>('POST', '/api/tasks', { project, prompt, draft }),
   drafts: () => api<{ drafts: Task[] }>('GET', '/api/drafts'),
+  setup: () => api<{ report: Array<{ name: string; ok: boolean; detail: string; required: boolean }> }>('GET', '/api/setup/check'),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
   createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability') =>

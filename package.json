@@ -18,7 +18,8 @@
     "daemon": "tsx apps/daemon/src/index.ts",
     "desk": "tsx apps/cli/src/index.ts",
     "web": "npm run dev -w apps/web",
-    "typecheck": "tsc --noEmit"
+    "release:windows": "node scripts/release-windows.mjs",
+    "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
   },
   "dependencies": {
     "dockerode": "^4.0.0"
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/dockerode": "^3.3.35",
     "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }
