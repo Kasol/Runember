@@ -265,7 +265,6 @@ export class Runner {
 
       // ③ 主执行：resume（带反馈+旧会话）或 normal
       const priorSession = kind === 'resume' ? store.lastSessionOfTask(task.id) : undefined;
-      const isCapability = (project.execution ?? 'capability') === 'capability';
       let cmd = kind === 'resume' && priorSession
         ? adapter.buildResumeArgs(priorSession, task.pending_feedback!)
         : adapter.buildArgs(task.prompt);
