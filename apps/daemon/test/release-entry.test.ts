@@ -44,3 +44,36 @@ test('the local release serves Web assets while keeping the API and stop endpoin
   })).statusCode, 202);
   assert.equal(stopped, true);
 });
+
+test('the Web folder picker browses host directories and requires local origin or an API token', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'agentdesk-test-folders-'));
+  const projectDir = join(dir, '测试 repo');
+  mkdirSync(join(projectDir, '.git'), { recursive: true });
+  mkdirSync(join(projectDir, '子文件夹'));
+  writeFileSync(join(projectDir, 'README.md'), 'fixture');
+  const cfg = loadConfig({ configPath: join(dir, 'missing.json'), dataDir: dir });
+  cfg.server.token = 'test-token';
+  const store = new Store(dir);
+  const app = buildServer({ cfg, store, scheduler: {} as Scheduler, docker: new Docker(), notifiers: [] });
+  t.after(async () => { await app.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  const browse = (payload: object, headers: Record<string, string> = {}) => app.inject({
+    method: 'POST', url: '/api/project-folders', payload, headers,
+  });
+  assert.equal((await browse({ path: projectDir })).statusCode, 401);
+  const remote = await browse({ path: projectDir }, { 'x-agentdesk-token': 'test-token' });
+  assert.equal(remote.statusCode, 200);
+  assert.equal(remote.headers['cache-control'], 'no-store');
+  assert.deepEqual(remote.json(), {
+    current: { name: '测试 repo', path: projectDir }, parent: dir,
+    folders: [{ name: '子文件夹', path: join(projectDir, '子文件夹') }],
+  });
+
+  cfg.server.token = '';
+  const local = { host: 'localhost:5173', origin: 'http://localhost:5173' };
+  assert.equal((await browse({ path: projectDir })).statusCode, 403);
+  assert.equal((await browse({}, { host: 'outside.invalid', origin: 'http://outside.invalid' })).statusCode, 403);
+  assert.equal((await browse({}, local)).statusCode, 200);
+  assert.equal((await browse({ path: 'relative' }, local)).statusCode, 400);
+  assert.equal((await browse({ path: join(dir, 'missing') }, local)).statusCode, 404);
+});

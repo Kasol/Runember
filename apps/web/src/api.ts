@@ -10,6 +10,14 @@ export interface MergeStatus {
   completed?: string;
 }
 
+export interface ProjectFolder { name: string; path: string }
+
+export interface ProjectFolderListing {
+  current: ProjectFolder | null;
+  parent: string | null;
+  folders: ProjectFolder[];
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
@@ -38,6 +46,7 @@ export const client = {
     api<{ task: Task }>('POST', '/api/tasks', { project, prompt, draft }),
   drafts: () => api<{ drafts: Task[] }>('GET', '/api/drafts'),
   setup: () => api<{ report: Array<{ name: string; ok: boolean; detail: string; required: boolean }> }>('GET', '/api/setup/check'),
+  projectFolders: (path?: string) => api<ProjectFolderListing>('POST', '/api/project-folders', { path }),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
   createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability') =>

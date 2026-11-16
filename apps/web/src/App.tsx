@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ApiError, client, setApiToken, STATUS_META, type Project, type Task, type Run, type MergeStatus } from './api';
+import { ApiError, client, setApiToken, STATUS_META, type Project, type Task, type Run, type MergeStatus, type ProjectFolder } from './api';
 import { stripAgentctlLines } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
+import { ProjectFolderPicker } from './ProjectFolderPicker';
 
 type Scope = number | 'all';
 
@@ -296,23 +297,31 @@ function ProjectStrip(props: {
 /** 添加项目弹窗：名称/路径/执行模式（注册时守门检测） */
 function AddProject(props: { onCreated: () => void }) {
   const [name, setName] = useState('');
-  const [path, setPath] = useState('');
+  const [folder, setFolder] = useState<ProjectFolder>();
+  const [showFolders, setShowFolders] = useState(false);
   const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
   const submit = async () => {
-    if (!name.trim() || !path.trim() || busy) return;
+    if (!name.trim() || !folder || busy) return;
     setBusy(true);
     setMsg('');
     try {
-      await client.createProject(name.trim(), path.trim(), 'codex', execution);
-      setName('');
-      setPath('');
+      await client.createProject(name.trim(), folder.path, 'codex', execution);
       props.onCreated();
     } catch (e: any) { setMsg(e?.message ?? '注册失败'); }
     setBusy(false);
   };
+
+  if (showFolders) {
+    return <ProjectFolderPicker initialPath={folder?.path} onClose={() => setShowFolders(false)} onSelect={selected => {
+      if (!name.trim() || name === folder?.name) setName(selected.name);
+      setFolder(selected);
+      setShowFolders(false);
+      setMsg('');
+    }} />;
+  }
 
   return (
     <Modal title="📁 添加项目" onClose={props.onCreated}>
@@ -320,9 +329,9 @@ function AddProject(props: { onCreated: () => void }) {
         <input placeholder="如 myapp" value={name} onChange={e => setName(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') void submit(); }} />
       </Labeled>
-      <Labeled label="本地 git 仓库的绝对路径">
-        <input placeholder="如 D:/work/myapp" value={path} onChange={e => setPath(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') void submit(); }} />
+      <Labeled label="项目文件夹">
+        {folder && <p className="folder-path">{folder.path}</p>}
+        <button disabled={busy} onClick={() => setShowFolders(true)}>{folder ? '更换文件夹' : '选择文件夹'}</button>
       </Labeled>
       <Labeled label="执行模式">
         <div className="mode-select">
@@ -338,7 +347,7 @@ function AddProject(props: { onCreated: () => void }) {
       </Labeled>
       {msg && <div className="form-err">{msg}</div>}
       <FormActions primary={busy ? '注册中…' : '注册'} onPrimary={() => void submit()}
-        disabled={busy || !name.trim() || !path.trim()} secondary="取消" onSecondary={() => props.onCreated()} />
+        disabled={busy || !name.trim() || !folder} secondary="取消" onSecondary={() => props.onCreated()} />
     </Modal>
   );
 }

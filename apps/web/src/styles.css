@@ -141,6 +141,19 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .setup-report li { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
 
+.folder-picker { display: grid; gap: 12px; }
+.folder-path { color: #57606a; font-size: 13px; line-height: 1.5; }
+.labeled .folder-path { margin-bottom: 6px; }
+.folder-list {
+  list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr)); gap: 6px;
+}
+.folder-list li { display: flex; min-width: 0; }
+.folder-list button {
+  width: 100%; min-width: 0; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; text-align: left; overflow-wrap: anywhere;
+}
+.folder-list button span { flex: none; color: #57606a; }
+
 .summary { background: #f0f7ff; border-left: 3px solid #1677ff; padding: 10px 14px; border-radius: 0 8px 8px 0; margin-bottom: 14px; font-size: 13.5px; }
 .summary b { color: #1677ff; }
 .summary p { margin-top: 4px; line-height: 1.6; white-space: pre-wrap; }

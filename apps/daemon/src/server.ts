@@ -18,6 +18,7 @@ import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
 import type { MergePlan } from './merge.js';
+import { listProjectFolders, ProjectFolderError } from './project-folders.js';
 
 export function buildServer(deps: {
   cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker; notifiers: Notifier[];
@@ -26,8 +27,8 @@ export function buildServer(deps: {
 }): FastifyInstance {
   const { cfg, store, scheduler } = deps;
   const app = Fastify({ logger: false });
-  const canManageMerge = (ip: string) =>
-    !!cfg.server.token || ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
+  const isLoopback = (ip: string) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
+  const canManageMerge = (ip: string) => !!cfg.server.token || isLoopback(ip);
 
   app.addHook('onRequest', async (req, reply) => {
     if (!cfg.server.token || !req.url.startsWith('/api/')) return;
@@ -39,7 +40,7 @@ export function buildServer(deps: {
   app.get('/healthz', async () => ({ ok: true, ts: Date.now(), instanceId: deps.control?.instanceId }));
 
   if (deps.control) app.post('/api/shutdown', async (req, reply) => {
-    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.ip) ||
+    if (!isLoopback(req.ip) ||
         req.headers['x-agentdesk-control'] !== deps.control!.key) {
       return reply.code(403).send({ error: '请从本机使用 desk stop。' });
     }
@@ -105,6 +106,24 @@ export function buildServer(deps: {
 
   // ── projects ──
   app.get('/api/projects', async () => ({ projects: store.listProjects() }));
+
+  app.post<{ Body: { path?: string } }>('/api/project-folders', async (req, reply) => {
+    const localOrigin = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname.toLowerCase()) &&
+      [`http://${req.host}`, `https://${req.host}`].includes(req.headers.origin ?? '');
+    if (!cfg.server.token && (!isLoopback(req.ip) || !localOrigin)) {
+      return reply.code(403).send({ error: '浏览主机文件夹需要本机看板或连接密钥' });
+    }
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return reply.code(400).send({ error: '无效的文件夹选择请求' });
+    }
+    try {
+      return reply.header('cache-control', 'no-store').send(await listProjectFolders(req.body.path));
+    } catch (error) {
+      if (error instanceof ProjectFolderError) return reply.code(error.status).send({ error: error.message });
+      throw error;
+    }
+  });
+
   /** 项目配置更新：模式切换 / extraPackages / mcpServers —— 切到 isolation 时重新守门检测 */
   app.patch<{ Params: { id: string }; Body: { execution?: string; extraPackages?: string[]; mcpServers?: string[] } }>(
     '/api/projects/:id', async (req, reply) => {
