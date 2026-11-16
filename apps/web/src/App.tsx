@@ -117,7 +117,7 @@ export default function App() {
         onChanged={() => void refresh()}
       />
 
-      <div className="row">
+      <div className="toolbar">
         <NewTask projects={projects} defaultProjectId={selected} onCreated={() => void refresh()} />
         <button onClick={() => setShowSetup(true)}>环境检查</button>
       </div>
@@ -315,7 +315,7 @@ function AddProject(props: { onCreated: () => void }) {
   };
 
   return (
-    <Modal title="📁 添加项目" onClose={() => props.onCreated()} width={560}>
+    <Modal title="📁 添加项目" onClose={props.onCreated}>
       <Labeled label="项目名">
         <input placeholder="如 myapp" value={name} onChange={e => setName(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') void submit(); }} />
@@ -433,7 +433,7 @@ function DraftCard(props: {
 function SetupPanel({ onClose }: { onClose: () => void }) {
   const [report, setReport] = useState<Awaited<ReturnType<typeof client.setup>>['report']>([]);
   const [message, setMessage] = useState('');
-  const [checking, setChecking] = useState(false);
+  const [checking, setChecking] = useState(true);
   const check = async () => {
     setChecking(true);
     setMessage('');
@@ -442,14 +442,30 @@ function SetupPanel({ onClose }: { onClose: () => void }) {
     finally { setChecking(false); }
   };
   useEffect(() => { void check(); }, []);
-  return <Modal title="宿主环境检查" onClose={onClose} width={580}>
-    <p>能力优先会以当前 Windows 用户身份在本机项目中运行。</p>
-    <ul>{report.map(row => <li key={row.name}>{row.ok ? '✅' : row.required ? '❌' : '⚠️'} {row.name} · {row.detail}</li>)}</ul>
-    {report.some(row => row.name === '宿主 Codex 登录' && !row.ok) && (
-      <p>在发布包目录打开终端，运行 <code>.\desk.cmd auth</code>，浏览器授权后再检查。源码运行方式为 <code>npm run desk -- auth</code>。</p>
-    )}
-    {message && <p role="alert">{message}</p>}
-    <button disabled={checking} onClick={() => void check()}>{checking ? '检查中…' : '重新检查'}</button>
+  return <Modal title="宿主环境检查" onClose={onClose} layout="setup">
+    <div className="setup-check">
+      <p>能力优先会以当前 Windows 用户身份在本机项目中运行。</p>
+      {report.length > 0 && <ul className="setup-report">
+        {report.map(row => (
+          <li key={row.name}>
+            <span className="setup-item">
+              <span role="img" aria-label={row.ok ? '通过' : row.required ? '未通过' : '可选'}>
+                {row.ok ? '✅' : row.required ? '❌' : '⚠️'}
+              </span>
+              <strong>{row.name}</strong>
+            </span>
+            <span className="setup-detail">{row.detail}</span>
+          </li>
+        ))}
+      </ul>}
+      {report.some(row => row.name === '宿主 Codex 登录' && !row.ok) && (
+        <p>在发布包目录打开终端，运行 <code>.\desk.cmd auth</code>，浏览器授权后再检查。源码运行方式为 <code>npm run desk -- auth</code>。</p>
+      )}
+      {message && <p className="form-err" role="alert">{message}</p>}
+      <div className="row">
+        <button className="primary" disabled={checking} onClick={() => void check()}>{checking ? '检查中…' : '重新检查'}</button>
+      </div>
+    </div>
   </Modal>;
 }
 
@@ -487,62 +503,56 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
   const summary = lastRun?.summary_json ? JSON.parse(lastRun.summary_json) : null;
 
   return (
-    <div className="overlay" onClick={props.onClose}>
-      <div className="panel" onClick={e => e.stopPropagation()}>
-        <div className="panel-head">
-          <h3>#{props.taskId}{task ? ` · ${STATUS_META[task.status].label}` : ''}</h3>
-          <button className="close" onClick={props.onClose}>✕</button>
+    <Modal title={`#${props.taskId}${task ? ` · ${STATUS_META[task.status].label}` : ''}`} onClose={props.onClose} layout="detail">
+      {error && <p role="alert">{error}</p>}
+      {!task && !error && <p>正在读取任务…</p>}
+      {task && <p className="prompt-full">{task.prompt}</p>}
+      {merge?.repo && merge.pr && (
+        <p><a href={`https://github.com/${merge.repo}/pull/${merge.pr}`} target="_blank" rel="noreferrer">查看 PR #{merge.pr}</a></p>
+      )}
+      {merge?.verified && <p className="dim">已验证提交 <code>{merge.verified.head}</code></p>}
+
+      {summary?.agentMessage && (
+        <div className="summary">
+          <b>agent 总结</b>
+          <p>{stripAgentctlLines(summary.agentMessage)}</p>
+          {summary.filesChanged?.length > 0 && (
+            <p className="dim">📝 改动 {summary.filesChanged.length} 个文件：{summary.filesChanged.slice(0, 6).join('、')}</p>
+          )}
         </div>
-        {error && <p role="alert">{error}</p>}
-        {!task && !error && <p>正在读取任务…</p>}
-        {task && <p className="prompt-full">{task.prompt}</p>}
-        {merge?.repo && merge.pr && (
-          <p><a href={`https://github.com/${merge.repo}/pull/${merge.pr}`} target="_blank" rel="noreferrer">查看 PR #{merge.pr}</a></p>
-        )}
-        {merge?.verified && <p className="dim">已验证提交 <code>{merge.verified.head}</code></p>}
+      )}
 
-        {summary?.agentMessage && (
-          <div className="summary">
-            <b>agent 总结</b>
-            <p>{stripAgentctlLines(summary.agentMessage)}</p>
-            {summary.filesChanged?.length > 0 && (
-              <p className="dim">📝 改动 {summary.filesChanged.length} 个文件：{summary.filesChanged.slice(0, 6).join('、')}</p>
-            )}
+      {task?.status === 'blocked' && (
+        <div className="feedback-box">
+          {!merge && <textarea
+            placeholder="输入你的决定（如：可以合并，今晚不部署）…"
+            value={feedback} onChange={e => setFeedback(e.target.value)}
+          />}
+          <div className="row">
+            {merge ? <button className="primary" onClick={() => void props.onAct(task.id, 'retry')}>核对并继续合并</button>
+              : <button className="primary" onClick={() => { void props.onAct(task.id, 'resume', feedback || '请继续'); setFeedback(''); }}>
+                带决定续跑
+              </button>}
+            <button onClick={() => void props.onAct(task.id, 'cancel')}>取消任务</button>
           </div>
-        )}
-
-        {task?.status === 'blocked' && (
-          <div className="feedback-box">
-            {!merge && <textarea
-              placeholder="输入你的决定（如：可以合并，今晚不部署）…"
-              value={feedback} onChange={e => setFeedback(e.target.value)}
-            />}
-            <div className="row">
-              {merge ? <button className="primary" onClick={() => void props.onAct(task.id, 'retry')}>核对并继续合并</button>
-                : <button className="primary" onClick={() => { void props.onAct(task.id, 'resume', feedback || '请继续'); setFeedback(''); }}>
-                  带决定续跑
-                </button>}
-              <button onClick={() => void props.onAct(task.id, 'cancel')}>取消任务</button>
-            </div>
-          </div>
-        )}
-
-        <div className="runs">
-          <b>Run 历史</b>
-          {runs.map(r => (
-            <div key={r.id} className="run-row">
-              run#{r.id} · {r.kind} · [{r.status}]{r.blocked_kind ? ` · ${r.blocked_kind}` : ''}
-              {r.session_id && <span className="dim"> · session {r.session_id.slice(0, 8)}</span>}
-              {r.checkpoint_sha && <p className="dim">Git checkpoint <code>{r.checkpoint_sha}</code></p>}
-            </div>
-          ))}
         </div>
+      )}
 
-        {log.length > 0 && (
-          <pre className="log">{log.slice(-40).join('\n')}</pre>
-        )}
+      <div className="runs">
+        <b>Run 历史</b>
+        {runs.map(r => (
+          <div key={r.id} className="run-row">
+            run#{r.id} · {r.kind} · [{r.status}]{r.blocked_kind ? ` · ${r.blocked_kind}` : ''}
+            {r.session_id && <span className="dim"> · session {r.session_id.slice(0, 8)}</span>}
+            {r.checkpoint_sha && <p className="dim">Git checkpoint <code>{r.checkpoint_sha}</code></p>}
+          </div>
+        ))}
       </div>
-    </div>
+
+      {log.length > 0 && (
+        <pre className="log">{log.slice(-40).join('\n')}</pre>
+      )}
+    </Modal>
   );
 }
 
@@ -573,10 +583,10 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
   };
 
   if (!open) {
-    return <button className="new-task" disabled={!props.projects.length} onClick={() => setOpen(true)}>＋ 新建任务</button>;
+    return <button className="primary" disabled={!props.projects.length} onClick={() => setOpen(true)}>＋ 新建任务</button>;
   }
   return (
-    <Modal title="📝 新建任务" onClose={() => setOpen(false)} width={560}>
+    <Modal title="📝 新建任务" onClose={() => setOpen(false)}>
       <Labeled label="项目">
         <select value={project} onChange={e => setProject(e.target.value)}>
           {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}

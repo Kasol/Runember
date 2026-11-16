@@ -1,21 +1,28 @@
-import type { ReactNode } from 'react';
+import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
 
-/** 通用弹窗：遮罩 + 面板 + 标题栏。点击遮罩/✕ 关闭（由父级通过 onClose 收起） */
-export function Modal(props: { title: string; onClose: () => void; children: ReactNode; width?: number }) {
+export function Modal({ title, onClose, children, layout = 'form' }: {
+  title: string; onClose: () => void; children: ReactNode; layout?: 'form' | 'setup' | 'detail';
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current!;
+    dialog.showModal();
+    return () => dialog.close();
+  }, []);
+
   return (
-    <div className="overlay" onClick={props.onClose}>
-      <div
-        className="panel form"
-        style={props.width ? { width: `min(${props.width}px, 94vw)` } : undefined}
-        onClick={e => e.stopPropagation()}
-      >
+    <dialog ref={dialogRef} className="overlay" aria-labelledby={titleId}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      onCancel={e => { e.preventDefault(); onClose(); }}>
+      <div className={`panel panel-${layout}`}>
         <div className="panel-head">
-          <h3>{props.title}</h3>
-          <button className="close" onClick={props.onClose}>✕</button>
+          <h3 id={titleId}>{title}</h3>
+          <button className="close" type="button" aria-label="关闭" onClick={onClose}>✕</button>
         </div>
-        {props.children}
+        {children}
       </div>
-    </div>
+    </dialog>
   );
 }
 
