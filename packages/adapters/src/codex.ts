@@ -19,7 +19,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   buildResumeArgs(sessionId: string, feedback: string): string[] {
-    return ['codex', 'exec', 'resume', sessionId, '--json', feedback];
+    return ['codex', 'exec', 'resume', sessionId, '--json', '--sandbox', 'workspace-write', feedback];
   }
 
   authCheckArgs(): string[] {

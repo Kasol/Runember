@@ -265,13 +265,17 @@ export class Runner {
 
       // ③ 主执行：resume（带反馈+旧会话）或 normal
       const priorSession = kind === 'resume' ? store.lastSessionOfTask(task.id) : undefined;
-      const cmd = kind === 'resume' && priorSession
+      const isCapability = (project.execution ?? 'capability') === 'capability';
+      let cmd = kind === 'resume' && priorSession
         ? adapter.buildResumeArgs(priorSession, task.pending_feedback!)
         : adapter.buildArgs(task.prompt);
+      // capability（能力优先）= 信任宿主环境：解除 codex Windows 沙箱降权
+      // （默认命令跑在 CodexSandboxUsers 受限账户，.git 对其显式拒写 → fetch/commit/push 全废）
+      if (isCapability) cmd = cmd.map(a => (a === 'workspace-write' ? 'danger-full-access' : a));
 
       let sessionId: string | undefined;
       let lastAgentText = '';
-      const isNative = (project.execution ?? 'capability') === 'capability';
+      const isNative = isCapability; // capability = 宿主原生执行
       // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
       const nativeEnv = this.proxyEnv();
       const onLine = (line: string) => {
