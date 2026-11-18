@@ -155,8 +155,8 @@ export class DingTalkStreamChannel implements FeedbackChannel {
           console.warn(`[dingtalk-stream] 拒绝未授权指令 (delivery=${traceId})`);
           ack();
           await this.reply(msg.sessionWebhook, commandLanguage(content) === 'en'
-            ? 'This account or conversation is not authorized. Configure access on the agentdesk host.'
-            : '此钉钉账号或会话尚未授权，请在 agentdesk 宿主机完成配置。');
+            ? 'This account or conversation is not authorized. Configure access on the Runember host.'
+            : '此钉钉账号或会话尚未授权，请在 Runember 宿主机完成配置。');
           return;
         }
         const action = parseCommand(content);
@@ -272,7 +272,7 @@ export class DingTalkStreamChannel implements FeedbackChannel {
         method: 'POST',
         signal: AbortSignal.timeout(10_000),
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ msgtype: 'markdown', markdown: { title: 'agentdesk', text } }),
+        body: JSON.stringify({ msgtype: 'markdown', markdown: { title: 'Runember', text } }),
       });
       const body = await res.json() as { errcode?: number; errmsg?: string };
       console.log(`📤 [dingtalk-stream] 回复结果: HTTP ${res.status} errcode=${body.errcode} ${body.errmsg ?? ''}`);

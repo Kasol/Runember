@@ -191,7 +191,7 @@ export class DingTalkReports {
       // Persist intent first. An ambiguous create must not generate duplicate documents.
       save({ state: 'creating' });
       const created = await this.call(['doc', 'create', '--name',
-        `Agentdesk · ${event.project.name} · ${language === 'en' ? 'Task' : '任务'} ${event.task.id} · Run ${run.id}`,
+        `Runember · ${event.project.name} · ${language === 'en' ? 'Task' : '任务'} ${event.task.id} · Run ${run.id}`,
         ...(this.cfg.folder ? ['--folder', this.cfg.folder] : [])]);
       const nodeId = created.nodeId ?? created.serverResponse?.nodeId;
       const url = docUrl(created.docUrl ?? created.serverResponse?.docUrl);

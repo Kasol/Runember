@@ -26,7 +26,7 @@ export function availableTaskActions(store: Store, task: Task, origin: 'api' | '
 }
 
 const HELP_ZH = [
-  '### 🤖 agentdesk 指令',
+  '### 🤖 Runember 指令',
   '- `项目` · 查看可派单的项目',
   '- `开始 [项目] <描述>` / `开始 编号` · 派发任务或启动草稿',
   '- `状态 [编号]` · 看队列，带编号时附最近 10 条活动',
@@ -38,7 +38,7 @@ const HELP_ZH = [
 ].join('  \n');
 
 const HELP_EN = [
-  '### 🤖 agentdesk commands',
+  '### 🤖 Runember commands',
   '- `projects` · List available projects',
   '- `start [project] <description>` / `start <number>` · Create a task or start a draft',
   '- `status [number]` · Show the queue or one task with its last 10 activities',

@@ -290,7 +290,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.log('agentdesk CLI —— 命令: start | stop | logs | doctor | auth | agents | project | draft | run | merge | status | activity | resume | retry | cancel | notify-test');
+      console.log('Runember CLI —— 命令: start | stop | logs | doctor | auth | agents | project | draft | run | merge | status | activity | resume | retry | cancel | notify-test');
       console.log('  例: npm run desk -- doctor       # 环境自检');
       console.log('      npm run desk -- project add demo D:/work/demo');
       console.log('      npm run desk -- run demo "给 README 加一节安装说明"');

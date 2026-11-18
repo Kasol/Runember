@@ -61,7 +61,7 @@ async function main(): Promise<void> {
   process.on('exit', unlock);
 
   mkdirSync(join(cfg.logDir, 'runs'), { recursive: true });
-  console.log(`agentdesk daemon 启动中…`);
+  console.log(`Runember daemon 启动中…`);
   console.log(`  dataDir=${cfg.dataDir}  并发=${cfg.scheduler.concurrency}  超时=${cfg.scheduler.taskTimeoutMin}min`);
   console.log(`  logDir=${cfg.logDir}`);
   if (cfg.proxy.httpsProxy || cfg.proxy.httpProxy) console.log('  已配置容器代理');

@@ -38,7 +38,7 @@ export function detailFooter(text: string, detailUrl?: string, language: UiLangu
 export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?: string, language: UiLanguage = 'zh-CN', reportFailed = false): { title: string; text: string; detailUrl?: string } {
   const t = (zh: string, en: string) => language === 'en' ? en : zh;
   const task = `**#${e.task.id}** ${e.project.name} · ${e.task.agent_id ?? e.project.agent_id}${e.task.model ? ' / ' + e.task.model : ''}`;
-  const detailLink = !reportUrl && !publicUrl ? t('完整答复和日志可在 Agentdesk 任务详情查看。', 'View the full response and log in Agentdesk.') : '';
+  const detailLink = !reportUrl && !publicUrl ? t('完整答复和日志可在 Runember 任务详情查看。', 'View the full response and log in Runember.') : '';
 
   if (e.kind === 'run.started') {
     const title = taskStateLabel({ state: 'running' }, language);
@@ -71,7 +71,7 @@ export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?
       details.blocker ? `${t('卡点', 'Blocker')} · ${excerpt(details.blocker, 140)}` : '',
       details.remaining ? `${t('待完成', 'Remaining work')} · ${excerpt(details.remaining, 140)}` : '',
       details.summary ? `**${t('Agent 答复', 'Agent response')}**\n\n${excerpt(details.summary, 220)}` : '',
-      reportFailed ? t('⚠️ 详情报告暂未生成，请在 Agentdesk 查看完整内容。', '⚠️ Detail report unavailable; view full details in Agentdesk.') : '',
+      reportFailed ? t('⚠️ 详情报告暂未生成，请在 Runember 查看完整内容。', '⚠️ Detail report unavailable; view full details in Runember.') : '',
       next,
       detailLink,
     ].filter(Boolean).join('\n\n'),
