@@ -4,11 +4,15 @@
  */
 import { AgentAdapter } from '@agentdesk/core';
 import { CodexAdapter } from './codex.js';
+import { ZcodeAdapter } from './zcode.js';
+import { DeepseekAdapter } from './deepseek.js';
 
 export type AdapterFactory = (image: string, homeVolume: string) => AgentAdapter;
 
 const REGISTRY = new Map<string, AdapterFactory>([
   ['codex', (img, vol) => new CodexAdapter(img, vol)],
+  ['zcode', (img, vol) => new ZcodeAdapter(img, vol)],
+  ['deepseek', (img, vol) => new DeepseekAdapter(img, vol)],
 ]);
 
 export function getAdapter(
@@ -24,3 +28,9 @@ export function getAdapter(
 export function availableAgents(): string[] {
   return [...REGISTRY.keys()];
 }
+
+export const agentDefinitions = [
+  { id: 'codex', label: 'Codex', modes: ['capability', 'isolation'] },
+  { id: 'zcode', label: 'ZCode', modes: ['capability'] },
+  { id: 'deepseek', label: 'DeepSeek Harness', modes: ['capability'] },
+] as const;

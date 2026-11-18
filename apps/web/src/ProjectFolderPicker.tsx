@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { client, type ProjectFolder, type ProjectFolderListing } from './api';
 import { FormActions, Modal } from './ui';
 
-export function ProjectFolderPicker({ initialPath, onSelect, onClose }: {
+export function ProjectFolderPicker({ initialPath, onSelect, onClose, title = '选择项目文件夹' }: {
   initialPath?: string;
+  title?: string;
   onSelect: (folder: ProjectFolder) => void;
   onClose: () => void;
 }) {
@@ -23,7 +24,7 @@ export function ProjectFolderPicker({ initialPath, onSelect, onClose }: {
 
   const current = listing?.current;
   return (
-    <Modal title="选择项目文件夹" onClose={onClose}>
+    <Modal title={title} onClose={onClose}>
       <div className="folder-picker">
         <div className="row">
           <button disabled={loading || (listing?.current === null && !error)} onClick={() => void browse()}>所有位置</button>

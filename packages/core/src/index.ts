@@ -9,6 +9,9 @@
 // ─────────────────────────── 领域类型 ───────────────────────────
 
 export type AgentId = string;
+export function agentLabel(id?: string | null): string {
+  return ({ codex: 'Codex', zcode: 'ZCode', deepseek: 'DeepSeek Harness' } as Record<string, string>)[id ?? 'codex'] ?? id!;
+}
 
 export type TaskStatus =
   | 'draft'       // 草稿：Web 派发后可编辑/排序，点「执行」才入队
@@ -51,6 +54,8 @@ export interface Project {
   /** 项目绝对路径 */
   workspace_path: string;
   agent_id: AgentId;
+  /** 项目默认模型；空值沿用执行器配置。 */
+  model?: string | null;
   /** 执行模式，默认 capability */
   execution?: ExecutionMode;
   /** 隔离模式专用：项目级系统依赖（预装进项目专属镜像） */
@@ -73,6 +78,10 @@ export interface HostTool {
 export interface Task {
   id: number;
   project_id: number;
+  /** 创建时保存的执行配置，续跑使用同一执行器。旧记录按 Codex 兼容。 */
+  agent_id?: AgentId | null;
+  model?: string | null;
+  execution?: ExecutionMode | null;
   prompt: string;
   status: TaskStatus;
   /** resume 时携带的人工反馈；runner 据此决定是新会话还是续会话 */
@@ -85,11 +94,15 @@ export interface Task {
 export interface Run {
   id: number;
   task_id: number;
+  agent_id?: AgentId | null;
+  model?: string | null;
   kind: 'normal' | 'resume';
   /** adapter 会话 id（codex thread id），续跑的钥匙 */
   session_id?: string;
   checkpoint_sha?: string;
-  worker?: { kind: 'native'; pid: number } | { kind: 'docker'; id: string };
+  worker?: { kind: 'native'; pid: number; control?: string } | { kind: 'docker'; id: string };
+  cancellation?: { requestedAt: string; issue?: string; killSent?: boolean };
+  execution?: { stoppedAt: string; exitCode: number | null; cancelled?: boolean; timedOut?: boolean; error?: string };
   status: RunStatus;
   exit_code?: number;
   blocked_kind?: BlockedKind;
@@ -105,86 +118,264 @@ export interface RunSummary {
   diffStat: string;
   sessionId?: string;
   usageNote?: string;
-  /** 结果报告：partial = agent 自报部分完成（人类需决定后续任务） */
+  /** 旧协议保留的 Agent 自报交付信息。 */
   partial?: boolean;
   remaining?: string;
+  inputRequest?: string;
+  blocker?: string;
+  diagnostic?: string;
+  artifacts?: RunArtifact[];
+  agentId?: AgentId;
+  model?: string;
 }
 
-/** 从 agent 末条消息解析结果标记（宽容式：无标记/坏 JSON 返回 null） */
-export function parseResultMarker(text: string): { done: boolean; summary?: string; remaining?: string } | null {
-  const line = text.split('\n').reverse().find(l => l.includes(AGENTCTL_RESULT_MARKER));
-  if (!line) return null;
-  try {
-    const j = JSON.parse(line.slice(line.indexOf(AGENTCTL_RESULT_MARKER) + AGENTCTL_RESULT_MARKER.length).trim());
-    return { done: j.done !== false, summary: j.summary, remaining: j.remaining };
-  } catch { return null; }
+export type TaskState = 'draft' | 'queued' | 'running' | 'awaiting_confirmation' | 'ended' | 'cancelled';
+export type UiLanguage = 'zh-CN' | 'en';
+export type LanguagePreference = 'auto' | UiLanguage;
+
+export const TASK_STATE_LABELS: Record<TaskState, string> = {
+  draft: '📝 草稿', queued: '⏳ 排队', running: '▶️ 运行中',
+  awaiting_confirmation: '🟡 等待确认', ended: '⏹ 已结束', cancelled: '🚫 已取消',
+};
+
+export interface TaskView extends Task {
+  state: TaskState;
+  confirmation?: string;
+  stopping?: boolean;
 }
 
-/** 展示用：剥掉协议标记行（BLOCKED/RESULT），只留人话 */
-export function stripAgentctlLines(text: string): string {
-  return text
-    .split('\n')
-    .filter(l => !l.includes(AGENTCTL_MARKER) && !l.includes(AGENTCTL_RESULT_MARKER))
-    .join('\n')
-    .trim();
+export function taskStateLabel(task: Pick<TaskView, 'state' | 'stopping'>, language: UiLanguage = 'zh-CN'): string {
+  if (language === 'en') {
+    const labels: Record<TaskState, string> = {
+      draft: '📝 Draft', queued: '⏳ Queued', running: '▶️ Running',
+      awaiting_confirmation: '🟡 Awaiting confirmation', ended: '⏹ Ended', cancelled: '🚫 Cancelled',
+    };
+    return task.state === 'running' && task.stopping ? `${labels.running} · Stopping` : labels[task.state];
+  }
+  return task.state === 'running' && task.stopping
+    ? `${TASK_STATE_LABELS.running} · 正在停止` : TASK_STATE_LABELS[task.state];
 }
 
-// ─────────────────────────── 阻塞协议 ───────────────────────────
+export interface TaskActions {
+  resume: 'session' | 'new_session' | false;
+  retry: boolean;
+  cancel: boolean;
+}
 
-/** 兼容旧会话中 agent 主动声明需要人工决策的标记 */
+export interface RunArtifact {
+  label: string;
+  location: string;
+  href?: string;
+}
+
+export interface RunDetails {
+  id: number;
+  agentId?: AgentId;
+  model?: string;
+  elapsedMs?: number;
+  stage: string;
+  exitCode?: number;
+  summary?: string;
+  diagnostic?: string;
+  confirmation?: string;
+  blocker?: string;
+  remaining?: string;
+  artifacts: RunArtifact[];
+  cancellationRequestedAt?: string;
+  stoppedAt?: string;
+  stopIssue?: string;
+  filesChanged?: string[];
+  diffStat?: string;
+}
+
+/** 兼容旧会话的结构化报告。 */
 export const AGENTCTL_MARKER = '###AGENTCTL_BLOCKED###';
-/** 兼容旧会话中 agent 的结构化结果标记 */
 export const AGENTCTL_RESULT_MARKER = '###AGENTCTL_RESULT###';
+
+const nonBlank = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value : undefined;
+
+function answerLines(text: string): Array<{ line: string; outsideCode: boolean }> {
+  let fence: string | undefined;
+  return text.split('\n').map(line => {
+    const trimmed = line.trim();
+    const delimiter = /^(`{3,}|~{3,})/.exec(trimmed)?.[0];
+    if (!delimiter) return { line, outsideCode: !fence && !trimmed.startsWith('>') };
+    if (!fence) fence = delimiter;
+    else if (delimiter[0] === fence[0] && delimiter.length >= fence.length && trimmed === delimiter) fence = undefined;
+    return { line, outsideCode: false };
+  });
+}
+
+function legacyReport(text: string, marker: string): Record<string, unknown> | undefined {
+  for (const { line, outsideCode } of answerLines(text).reverse()) {
+    const trimmed = line.trim();
+    if (!outsideCode || !trimmed.startsWith(marker)) continue;
+    try {
+      const value = JSON.parse(trimmed.slice(marker.length));
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    } catch { /* 跳过无效旧协议行 */ }
+  }
+}
+
+export function parseResultMarker(text: string): {
+  done: boolean; summary?: string; remaining?: string; blocker?: string; artifacts?: unknown[];
+} | null {
+  const report = legacyReport(text, AGENTCTL_RESULT_MARKER);
+  if (typeof report?.done !== 'boolean') return null;
+  return {
+    done: report.done, summary: nonBlank(report.summary), remaining: nonBlank(report.remaining),
+    blocker: nonBlank(report.blocker), artifacts: Array.isArray(report.artifacts) ? report.artifacts : undefined,
+  };
+}
+
+export function parseInputRequest(text: string): string | undefined {
+  const report = legacyReport(text, AGENTCTL_MARKER);
+  return nonBlank(report?.question) ?? nonBlank(report?.reason);
+}
+
+export function stripAgentctlLines(text: string): string {
+  return answerLines(text)
+    .filter(({ line, outsideCode }) => !outsideCode || ![AGENTCTL_MARKER, AGENTCTL_RESULT_MARKER]
+      .some(marker => line.trimStart().startsWith(marker)))
+    .map(({ line }) => line)
+    .join('\n');
+}
+
+export function readRunSummary(run?: Run): RunSummary | undefined {
+  if (!run?.summary_json) return;
+  try {
+    const value = JSON.parse(run.summary_json);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as RunSummary;
+  } catch { /* 旧记录可能没有可读摘要 */ }
+}
+
+function runInputRequest(run: Run | undefined, summary: RunSummary | undefined): string | undefined {
+  if (run?.status !== 'blocked' || run.blocked_kind !== 'approval_needed') return;
+  return nonBlank(summary?.inputRequest) ?? parseInputRequest(nonBlank(summary?.agentMessage) ?? '');
+}
+
+export function taskView(task: Task, run?: Run): TaskView {
+  const status = task.status;
+  if (status === 'running') return { ...task, state: status, stopping: !!run?.cancellation };
+  if (status !== 'blocked' && status !== 'failed' && status !== 'done') return { ...task, state: status };
+  const confirmation = status === 'blocked' ? runInputRequest(run, readRunSummary(run)) : undefined;
+  return { ...task, state: confirmation ? 'awaiting_confirmation' : 'ended', confirmation };
+}
+
+export function runStage(run: Run): string {
+  if ((run.status === 'starting' || run.status === 'running') && run.cancellation) return '正在停止';
+  if (run.status === 'starting') return '准备执行';
+  if (run.status === 'running') return '运行中';
+  if (run.status === 'queued') return '排队';
+  if (run.status === 'cancelled') return '已取消';
+  switch (run.blocked_kind) {
+    case 'timeout': return '运行超时';
+    case 'interrupted': return '运行中断';
+    case 'auth_missing': return '认证未通过';
+    case 'quota_exhausted': return '执行器请求受限';
+  }
+  if (run.exit_code === 0) return '正常退出';
+  if (run.exit_code != null && run.exit_code !== -1) return '异常退出';
+  if (!run.worker && run.status === 'blocked' && !runInputRequest(run, readRunSummary(run))) return '启动检查未通过';
+  if (!run.worker && run.status === 'failed') return '启动失败';
+  if (run.status === 'failed') return '执行异常';
+  return '已停止';
+}
+
+export function runDetails(run: Run, agentId?: AgentId, remaining?: string | null): RunDetails {
+  const summary = readRunSummary(run);
+  const answer = nonBlank(summary?.agentMessage) ?? '';
+  const report = parseResultMarker(answer);
+  const text = nonBlank(stripAgentctlLines(answer)) ?? report?.summary;
+  const started = Date.parse(run.started_at ?? '');
+  const ended = Date.parse(run.ended_at ?? '');
+  const artifacts = new Map<string, RunArtifact>();
+  const addArtifact = (label: unknown, location: unknown) => {
+    const name = nonBlank(label);
+    const target = nonBlank(location);
+    if (!name || !target) return;
+    if (/^https?:\/\/[^\s<>]+$/i.test(target)) artifacts.set(target, { label: name, location: target, href: target });
+    else if (/^(?:\/(?!\/)|[A-Za-z]:[\\/])/.test(target)) artifacts.set(target, { label: name, location: target });
+  };
+  if (Array.isArray(summary?.artifacts)) {
+    for (const artifact of summary.artifacts) addArtifact(artifact?.label, artifact?.location);
+  }
+  for (const artifact of report?.artifacts ?? []) {
+    if (typeof artifact === 'object' && artifact !== null && 'label' in artifact && 'location' in artifact) {
+      addArtifact(artifact.label, artifact.location);
+    }
+  }
+  for (const { line, outsideCode } of answerLines(text ?? '')) {
+    if (!outsideCode) continue;
+    for (const link of line.matchAll(/!?\[([^\]\r\n]+)\]\(([^)\r\n]+)\)/g)) {
+      if (!link[0].startsWith('!')) addArtifact(link[1], link[2]);
+    }
+  }
+  const blocker = nonBlank(summary?.blocker) ?? report?.blocker ?? ({
+    git_in_progress: '工作目录还有未结束的 Git 操作。',
+    external_write: '运行期间检测到工作区被外部修改。',
+    verification_failed: '本轮记录的验收未通过。',
+  } as Partial<Record<BlockedKind, string>>)[run.blocked_kind ?? 'unknown_error'];
+  return {
+    id: run.id, agentId: run.agent_id ?? nonBlank(summary?.agentId) ?? agentId, model: nonBlank(summary?.model) ?? run.model ?? undefined, stage: runStage(run),
+    exitCode: run.exit_code === -1 ? undefined : run.exit_code ?? undefined,
+    elapsedMs: Number.isFinite(ended - started) ? Math.max(0, ended - started) : undefined,
+    summary: text, diagnostic: nonBlank(summary?.diagnostic), confirmation: runInputRequest(run, summary), blocker,
+    remaining: nonBlank(summary?.remaining) ?? report?.remaining
+      ?? (remaining === '（agent 未给出明细）' ? undefined : nonBlank(remaining)),
+    artifacts: [...artifacts.values()],
+    cancellationRequestedAt: run.cancellation?.requestedAt,
+    stoppedAt: run.execution?.stoppedAt ?? (run.status === 'cancelled' ? run.ended_at ?? undefined : undefined),
+    stopIssue: run.status === 'starting' || run.status === 'running' ? run.cancellation?.issue : undefined,
+    filesChanged: summary?.filesChanged,
+    diffStat: summary?.diffStat,
+  };
+}
+
+export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): string {
+  if (language === 'en') {
+    const stages: Record<string, string> = {
+      '准备执行': 'Preparing', '运行中': 'Running', '排队': 'Queued', '已取消': 'Cancelled',
+      '运行超时': 'Timed out', '运行中断': 'Interrupted', '认证未通过': 'Authentication failed',
+      '执行器请求受限': 'Agent request limited', '正常退出': 'Normal exit', '异常退出': 'Non-zero exit',
+      '启动失败': 'Startup failed', '执行异常': 'Execution error', '已停止': 'Stopped',
+      '启动检查未通过': 'Startup check failed', '正在停止': 'Stopping',
+    };
+    const elapsed = details.elapsedMs === undefined ? '' : ` · ${(details.elapsedMs / 1000).toFixed(1)} seconds`;
+    const exit = details.exitCode === undefined ? '' : ` · Exit code ${details.exitCode}`;
+    return `Run #${details.id} · ${details.agentId ?? 'Agent not recorded'}${details.model ? ' / ' + details.model : ''} · ${stages[details.stage] ?? details.stage}${exit}${elapsed}`;
+  }
+  const elapsed = details.elapsedMs === undefined ? '' : ` · 耗时 ${(details.elapsedMs / 1000).toFixed(1)} 秒`;
+  const exit = details.exitCode === undefined ? '' : ` · 退出码 ${details.exitCode}`;
+  return `Run #${details.id} · ${details.agentId ?? 'Agent 未记录'}${details.model ? ' / ' + details.model : ''} · ${details.stage}${exit}${elapsed}`;
+}
 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────
 
 export interface ClassifyInput {
-  exitCode: number;
+  exitCode: number | null;
   killed: boolean;
-  lastAgentText: string;   // 最后一条 agent_message（含协议标记）
-  errTail: string;         // stderr/错误事件尾部
+  interrupted?: boolean;
+  lastAgentText: string;
+  inputRequest?: string;
+  errTail: string;
 }
 
 export interface ClassifyResult {
   status: 'succeeded' | 'failed' | 'blocked';
   blockedKind?: BlockedKind;
-  reason?: string;
+  inputRequest?: string;
 }
 
-const workflow = '(?:(?:当前|本次|本轮)\\s*)?(?:自动化)?(?:合并|提交|交付|发布|部署|任务|流程)';
-const failedCheck = '(?:全量|单元|集成)?(?:测试|验证|验收|检查|npm test)\\s*(?:未通过|没有通过|没过|失败|超时)';
-const paused = '(?:暂停|暂缓|阻塞|无法继续|不能继续)';
-const verificationBlockStatements = [
-  new RegExp(`^${workflow}\\s*(?:因(?:为)?|由于)\\s*${failedCheck}\\s*(?:而|因此|所以)?\\s*${paused}(?=[。.!！]|$)`),
-  new RegExp(`^(?:(?:因(?:为)?|由于)\\s*)?${failedCheck}[，,；;]\\s*(?:因此|所以)?\\s*(?:${workflow}\\s*(?:已|被|仍)?${paused}|(?:无法|不能)继续${workflow})(?=[。.!！]|$)`),
-  /^(?:the\s+)?(?:merge|release|deployment|workflow|task)\s+(?:(?:is|has been)\s+)?(?:paused|blocked|stopped|on hold)\s+(?:because|due to)\s+(?:(?:the|full|automated|required)\s+)*(?:tests?|checks?|verification)\s+(?:failed|did not pass|timed out)(?=[.!]|$)/i,
-];
-
-/** 只接受答复中明确说明流程因验收失败而暂停的状态句。 */
-function reportedVerificationBlock(text: string): string | undefined {
-  const answer = text.replace(/^\s*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s*\1[ \t]*\r?$/gm, '');
-  for (const line of answer.split('\n')) {
-    const statement = line.trim().replace(/^(?:#{1,6}|[-*+] |\d+\.)\s*/, '').replace(/[*`]/g, '').trim();
-    for (const pattern of verificationBlockStatements) {
-      const match = statement.match(pattern);
-      if (match) return match[0];
-    }
-  }
-}
-
-/** Run 终态由超时、人工阻塞、退出码和答复决定。 */
+/** Run 终态只使用执行事实与明确的输入请求。 */
 export function classifyRun(input: ClassifyInput): ClassifyResult {
   if (input.killed) return { status: 'blocked', blockedKind: 'timeout' };
-  if (input.lastAgentText.includes(AGENTCTL_MARKER)) {
-    return { status: 'blocked', blockedKind: 'approval_needed' };
-  }
-  if (input.exitCode === 0) {
-    if (!input.lastAgentText.trim()) return { status: 'blocked', blockedKind: 'missing_result' };
-    const reason = reportedVerificationBlock(input.lastAgentText);
-    if (reason) return { status: 'blocked', blockedKind: 'verification_failed', reason };
-    return { status: 'succeeded' };
-  }
-  const t = (input.errTail + '\n' + input.lastAgentText).toLowerCase();
+  if (input.interrupted) return { status: 'blocked', blockedKind: 'interrupted' };
+  const inputRequest = nonBlank(input.inputRequest) ?? parseInputRequest(input.lastAgentText);
+  if (inputRequest) return { status: 'blocked', blockedKind: 'approval_needed', inputRequest };
+  if (input.exitCode === 0) return { status: 'succeeded' };
+  const t = input.errTail.toLowerCase();
   if (/401|unauthorized|not logged in|未登录|invalid api key/.test(t)) {
     return { status: 'blocked', blockedKind: 'auth_missing' };
   }
@@ -194,18 +385,9 @@ export function classifyRun(input: ClassifyInput): ClassifyResult {
   return { status: 'failed', blockedKind: 'unknown_error' };
 }
 
-/** Task 聚合状态随 Run 终态迁移 */
-export function taskStatusAfterRun(
-  task: Task,
-  run: Run,
-  result: ClassifyResult,
-): TaskStatus {
-  switch (result.status) {
-    case 'succeeded': return 'done';
-    case 'blocked': return 'blocked';
-    case 'failed': return 'failed';
-  }
-  void run;
+/** 保留旧调度字段的聚合规则，用户可见状态由 taskView 映射。 */
+export function taskStatusAfterRun(result: ClassifyResult): TaskStatus {
+  return result.status === 'succeeded' ? 'done' : result.status;
 }
 
 // ─────────────────────────── 调度决策（纯函数） ───────────────────────────
@@ -236,28 +418,69 @@ export interface AgentAdapter {
   image: string;
   /** codex-home 卷名（凭证 + 会话，resume 的命脉） */
   homeVolume: string;
+  /** 可选的最终答复结构，由适配器映射为通用事件。 */
+  finalResponseSchema?: object;
   /** 正常任务的命令 */
-  buildArgs(prompt: string, execution?: ExecutionMode): string[];
+  buildArgs(prompt: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string): string[];
   /** 续跑命令：恢复会话并传递用户反馈 */
-  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode): string[];
+  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string): string[];
   /** 单行事件解析：返回 null 表示该行不是关心的 JSONL 事件 */
-  parseLine(line: string): AdapterEvent | null;
+  parseLine(line: string, structuredResponse?: boolean): AdapterEvent | null;
   /** 启动前凭证自检命令（如 test -f auth.json），exit 0 为通过 */
   authCheckArgs(): string[];
 }
 
+export interface AgentActivity {
+  key: string;
+  kind: 'turn' | 'command' | 'files' | 'tool' | 'search' | 'message';
+  phase: 'started' | 'completed' | 'failed';
+  detail?: string;
+}
+
+export interface RunActivity extends AgentActivity {
+  at: string;
+}
+
+export function describeActivity(item: AgentActivity, language: UiLanguage = 'zh-CN'): string {
+  if (language === 'en') {
+    const labels: Record<AgentActivity['kind'], Record<AgentActivity['phase'], string>> = {
+      turn: { started: 'Agent started', completed: 'Agent turn ended', failed: 'Agent turn failed' },
+      command: { started: 'Command started', completed: 'Command ended', failed: 'Command failed' },
+      files: { started: 'Updating files', completed: 'File update ended', failed: 'File update failed' },
+      tool: { started: 'Tool call started', completed: 'Tool call ended', failed: 'Tool call failed' },
+      search: { started: 'Web search started', completed: 'Web search ended', failed: 'Web search failed' },
+      message: { started: 'Agent update', completed: 'Agent update', failed: 'Agent update' },
+    };
+    return labels[item.kind][item.phase] + (item.detail ? ` · ${item.detail}` : '');
+  }
+  const labels: Record<AgentActivity['kind'], Record<AgentActivity['phase'], string>> = {
+    turn: { started: 'Agent 开始执行', completed: 'Agent 本轮执行结束', failed: 'Agent 本轮执行失败' },
+    command: { started: '开始执行命令', completed: '命令执行结束', failed: '命令执行失败' },
+    files: { started: '开始更新文件', completed: '文件更新结束', failed: '文件更新失败' },
+    tool: { started: '开始调用工具', completed: '工具调用结束', failed: '工具调用失败' },
+    search: { started: '开始搜索网页', completed: '网页搜索结束', failed: '网页搜索失败' },
+    message: { started: 'Agent 更新', completed: 'Agent 更新', failed: 'Agent 更新' },
+  };
+  return labels[item.kind][item.phase] + (item.detail ? ` · ${item.detail}` : '');
+}
+
 export interface AdapterEvent {
-  type: 'session' | 'agent_message' | 'error' | 'other';
+  type: 'session' | 'agent_message' | 'input_requested' | 'error' | 'activity' | 'other';
   sessionId?: string;
+  model?: string;
   text?: string;
+  /** 这条答复明确请求的必需输入，与该答复一起更新。 */
+  inputRequest?: string;
+  activity?: AgentActivity;
 }
 
 /** 通知器：daemon 只发领域事件，实现方决定发到哪（Console/钉钉/企微/邮件…） */
-export type NotifyEvent = { runId: number } & (
+export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskActions } & (
   | { kind: 'run.started'; task: Task; project: Project }
+  | { kind: 'run.cancelled'; task: Task; project: Project; summary: RunSummary }
   | { kind: 'run.succeeded'; task: Task; project: Project; summary: RunSummary }
   | { kind: 'run.failed'; task: Task; project: Project; reason: string; retryViaCli?: boolean }
-  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string; retryViaCli?: boolean });
+  | { kind: 'run.blocked'; task: Task; project: Project; blockedKind: BlockedKind; question?: string; summary?: RunSummary; retryViaCli?: boolean });
 
 export interface Notifier {
   readonly name: string;
@@ -273,12 +496,15 @@ export interface ExecutionBackend {
 
 /** 人从远端（IM/网页/…）发回的指令 */
 export interface FeedbackAction {
-  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'help' | 'run' | 'draft' | 'projects';
+  type: 'resume' | 'retry' | 'cancel' | 'status' | 'detail' | 'activity' | 'help' | 'run' | 'draft' | 'projects';
   taskId?: number;
+  runId?: number;
   feedback?: string;
   /** 新任务描述，或启动草稿时给已有任务追加的说明 */
   prompt?: string;
   projectId?: number;
+  projectName?: string;
+  language?: UiLanguage;
 }
 
 /**
@@ -291,3 +517,4 @@ export interface FeedbackChannel {
   start(dispatch: (action: FeedbackAction) => Promise<{ ok: boolean; message: string }>): Promise<void>;
   stop?(): void | Promise<void>;
 }
+export * from './diagnostics.js';

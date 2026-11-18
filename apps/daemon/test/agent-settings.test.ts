@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import test from 'node:test';
+import Docker from 'dockerode';
+import { loadConfig } from '../src/config.js';
+import { Store } from '../src/store.js';
+import { buildServer } from '../src/server.js';
+import { findNativeAgent, runtimeConfig } from '../src/agent-runtime.js';
+import { readRuntimeConfig } from '../src/agent-settings.js';
+import type { Scheduler } from '../src/scheduler.js';
+
+test('CLI path overrides validate files, persist across restart and affect the runner and diagnostics', async t => {
+  const dir = mkdtempSync(resolve('data', 'test-agent-settings-'));
+  const cfg = loadConfig({ configPath: join(dir, 'missing.json'), dataDir: dir });
+  cfg.server.token = '';
+  const store = new Store(dir);
+  const app = buildServer({ cfg, store, docker: new Docker(), notifiers: [], scheduler: { tickNow() {} } as Scheduler });
+  t.after(async () => { await app.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const file = join(dir, 'fake-zcode.cjs'); writeFileSync(file, '');
+  const patch = (executable: unknown, remoteAddress = '127.0.0.1', origin?: string) => app.inject({ method: 'PATCH', url: '/api/settings/agents/zcode', payload: { executable }, remoteAddress, headers: origin ? { origin } : {} });
+  assert.equal((await patch(file, '192.0.2.1')).statusCode, 403);
+  assert.equal((await patch(file, '127.0.0.1', 'https://other.example')).statusCode, 403);
+  for (const invalid of [null, [], dir, 'relative.exe', join(dir, 'missing.exe')]) assert.equal((await patch(invalid)).statusCode, 400);
+  assert.equal((await patch(file)).statusCode, 200);
+  const saved = (await app.inject({ url: '/api/agents' })).json().details.find((agent: any) => agent.id === 'zcode');
+  assert.equal(saved.executable, file);
+  assert.deepEqual(saved.command, [process.execPath, file]);
+  assert.equal(findNativeAgent('zcode', runtimeConfig(cfg, store))?.executable, file);
+  assert.equal(findNativeAgent('zcode', readRuntimeConfig(cfg))?.executable, file);
+  assert.equal((await patch('')).statusCode, 200);
+  assert.equal(store.getSetting('agents.zcode.executable'), '');
+  assert.equal(runtimeConfig(cfg, store).agents.zcode?.executable, '');
+});

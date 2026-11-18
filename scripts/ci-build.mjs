@@ -1,0 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const npm = process.env.npm_execpath;
+const invoke = (...args) => execFileSync(process.execPath, [npm, ...args], { stdio: 'inherit' });
+invoke('run','release:runtime');
+const version=JSON.parse(readFileSync('package.json','utf8')).version;
+const runtime=resolve('dist',`runember-${version}-${process.platform==='win32'?'windows':'macos'}-${process.arch}`);
+execFileSync(process.execPath,['scripts/smoke-runtime.mjs',runtime],{stdio:'inherit'});
+invoke('run','package:desktop','--',runtime,'dist/installers');

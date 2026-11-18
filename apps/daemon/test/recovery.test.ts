@@ -11,7 +11,10 @@ import { parse } from 'smol-toml';
 import { loadConfig } from '../src/config.js';
 import { hostAudit, hostCheckpoint } from '../src/hostgit.js';
 import { renderMcpConfig } from '../src/mcp.js';
-import type { Runner } from '../src/runner.js';
+import { runNative } from '../src/native.js';
+import { Runner } from '../src/runner.js';
+import { EventBus } from '../src/notify.js';
+import type Docker from 'dockerode';
 import { Scheduler } from '../src/scheduler.js';
 import { Store } from '../src/store.js';
 
@@ -62,33 +65,34 @@ test('resolves the log directory independently from the data directory', t => {
   assert.equal(loadConfig({ configPath, dataDir, logDir: 'override' }).logDir, join(dataDir, 'override'));
 });
 
-test('accepts ordinary Codex replies and distinguishes missing replies and old blocked markers', () => {
+test('normal exit ignores business outcomes and waits only for an explicit input request', () => {
   const exit = { exitCode: 0, killed: false, errTail: '' };
   assert.deepEqual(classifyRun({ ...exit, lastAgentText: 'finished' }), { status: 'succeeded' });
-  assert.deepEqual(classifyRun({ ...exit, lastAgentText: '  ' }), { status: 'blocked', blockedKind: 'missing_result' });
+  assert.deepEqual(classifyRun({ ...exit, lastAgentText: '  ' }), { status: 'succeeded' });
   assert.deepEqual(classifyRun({ ...exit, lastAgentText: '###AGENTCTL_BLOCKED### {"question":"Review?"}' }),
-    { status: 'blocked', blockedKind: 'approval_needed' });
+    { status: 'blocked', blockedKind: 'approval_needed', inputRequest: 'Review?' });
   assert.deepEqual(classifyRun({ ...exit, lastAgentText: '###AGENTCTL_RESULT### {"done":false}' }), { status: 'succeeded' });
 });
 
-test('blocks a normal exit when the final reply explicitly reports an acceptance failure that paused work', () => {
+test('records executor failures independently of the final answer', () => {
   const exit = { exitCode: 0, killed: false, errTail: '' };
-  const reasons = [
-    ['已解决冲突并完成 rebase。\n\n**合并因全量测试未通过而暂停。** 最终候选有 146 项失败。', '合并因全量测试未通过而暂停'],
-    ['- 验收未通过，因此无法继续发布。', '验收未通过，因此无法继续发布'],
-    ['Merge is blocked because the required tests failed.', 'Merge is blocked because the required tests failed'],
-  ];
-  for (const [lastAgentText, reason] of reasons) {
-    assert.deepEqual(classifyRun({ ...exit, lastAgentText }), { status: 'blocked', blockedKind: 'verification_failed', reason });
-  }
   for (const lastAgentText of [
-    '测试失败，已查明原因并提交诊断报告。',
-    '合并因全量测试未通过而暂停过，修复后已通过并合并。',
-    '报告格式示例\n\n```text\n合并因测试未通过而暂停。\n```',
-    '> 合并因测试未通过而暂停。\n\n这是上一轮的记录，本轮已通过测试并完成合并。',
+    '已解决冲突并完成 rebase。\n\n**合并因全量测试未通过而暂停。** 最终候选有 146 项失败。',
+    'Merge is blocked because the required tests failed.',
+    '###AGENTCTL_BLOCKED### invalid',
+    '```text\n###AGENTCTL_BLOCKED### {"question":"Example?"}\n```',
+    '> ###AGENTCTL_BLOCKED### {"question":"Example?"}',
   ]) {
     assert.deepEqual(classifyRun({ ...exit, lastAgentText }), { status: 'succeeded' });
   }
+  const explicit = { ...exit, lastAgentText: 'Results so far', inputRequest: 'Provide an account?' };
+  assert.deepEqual(classifyRun(explicit), { status: 'blocked', blockedKind: 'approval_needed', inputRequest: explicit.inputRequest });
+  assert.deepEqual(classifyRun({ ...explicit, exitCode: null, killed: true }), { status: 'blocked', blockedKind: 'timeout' });
+  assert.deepEqual(classifyRun({ ...explicit, exitCode: null, interrupted: true }), { status: 'blocked', blockedKind: 'interrupted' });
+  assert.deepEqual(classifyRun({ ...exit, exitCode: 1, errTail: '401 Unauthorized', lastAgentText: '' }),
+    { status: 'blocked', blockedKind: 'auth_missing' });
+  assert.deepEqual(classifyRun({ ...exit, exitCode: 2, lastAgentText: 'Checked an API that returned 401' }),
+    { status: 'failed', blockedKind: 'unknown_error' });
 });
 
 test('passes task and resume text unchanged to Codex in both execution modes', () => {
@@ -100,6 +104,76 @@ test('passes task and resume text unchanged to Codex in both execution modes', (
     ['codex', 'exec', '--json', '--sandbox', 'workspace-write', '--', feedback]);
   assert.deepEqual(adapter.buildResumeArgs('test-session', feedback, 'capability'),
     ['codex', 'exec', '--sandbox', 'danger-full-access', 'resume', 'test-session', '--json', '--', feedback]);
+  assert.deepEqual(adapter.buildArgs(feedback, 'isolation', '/agentdesk-final-response.json'),
+    ['codex', 'exec', '--json', '--sandbox', 'workspace-write', '--output-schema', '/agentdesk-final-response.json', '--', feedback]);
+  assert.deepEqual(adapter.buildResumeArgs('test-session', feedback, 'capability', 'C:/test/final response.json'),
+    ['codex', 'exec', '--sandbox', 'danger-full-access', 'resume', 'test-session', '--json',
+      '--output-schema', 'C:/test/final response.json', '--', feedback]);
+});
+
+test('Codex separates a structured input request from the user-facing answer', () => {
+  const adapter = getAdapter('codex', 'test-image', 'test-volume');
+  const message = (text: string) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } });
+  const question = '请告诉我城市名称。';
+  const waiting = JSON.stringify({ answer: '', input_request: question });
+  assert.deepEqual(adapter.parseLine(message(waiting), true), { type: 'agent_message', text: '', inputRequest: question });
+  assert.deepEqual(adapter.parseLine(message(waiting)), { type: 'agent_message', text: waiting });
+  const answer = '验收失败，流程已暂停。\n如果需要，我可以继续排查。';
+  assert.deepEqual(adapter.parseLine(message(JSON.stringify({ answer, input_request: null })), true),
+    { type: 'agent_message', text: answer, inputRequest: undefined });
+  assert.deepEqual(adapter.parseLine(message(question), true), { type: 'agent_message', text: question });
+});
+
+test('Codex records observable activity without command output or tool arguments', () => {
+  const adapter = getAdapter('codex', 'test-image', 'test-volume');
+  const event = (type: string, item: object) => adapter.parseLine(JSON.stringify({ type, item }), true);
+  const command = { id: 'cmd', type: 'command_execution',
+    command: '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command "git status -- private-path"',
+    aggregated_output: 'private output',
+  };
+  assert.deepEqual(event('item.started', command)?.activity,
+    { key: 'cmd', kind: 'command', phase: 'started', detail: 'git status' });
+  assert.deepEqual(event('item.completed', { ...command, exit_code: 2 })?.activity,
+    { key: 'cmd', kind: 'command', phase: 'failed', detail: 'git status' });
+  assert.deepEqual(event('item.started', {
+    id: 'tool', type: 'mcp_tool_call', tool: 'search_docs', arguments: { token: 'private token' },
+  })?.activity, { key: 'tool', kind: 'tool', phase: 'started', detail: 'search_docs' });
+  assert.deepEqual(event('item.completed', { id: 'files', type: 'file_change', changes: [{ path: 'a' }, { path: 'b' }] })?.activity,
+    { key: 'files', kind: 'files', phase: 'completed', detail: '2 项' });
+  const progress = event('item.completed', { id: 'msg', type: 'agent_message', text: '已定位失败用例。\n正在检查相关文件。' });
+  assert.equal(progress?.activity?.detail, '已定位失败用例。 正在检查相关文件。');
+  assert.equal(event('item.completed', { id: 'final', type: 'agent_message', text: '{"answer":"done","input_request":null}' })?.activity, undefined);
+});
+
+test('an exited native process settles even when its background child keeps its pipes open', { timeout: 10_000 }, async t => {
+  const parent = [
+    "const { spawn } = require('node:child_process');",
+    "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 7000)'], {",
+    "  detached: true, windowsHide: true, stdio: ['ignore', 1, 2],",
+    "});",
+    "child.unref();",
+    "console.log(child.pid);",
+    "process.stdout.write('最后一条回复');",
+  ].join('\n');
+  let backgroundPid: number | undefined;
+  t.after(() => {
+    if (backgroundPid) {
+      try { process.kill(backgroundPid); } catch { /* fixture already exited */ }
+    }
+  });
+  const output: string[] = [];
+  const result = await runNative({
+    cmd: [process.execPath, '-e', parent], cwd: process.cwd(), timeoutMs: 3_000,
+    onStdoutLine: line => {
+      if (backgroundPid === undefined) backgroundPid = Number(line);
+      else output.push(line);
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.killed, false);
+  assert.deepEqual(output, ['最后一条回复']);
+  assert.ok(backgroundPid);
+  assert.doesNotThrow(() => process.kill(backgroundPid!, 0));
 });
 
 test('builds independent MCP config overlays and preserves the other Codex settings', () => {
@@ -180,7 +254,11 @@ test('holds a recovered live worker and refills exactly one freed slot', async t
   let workerAlive = true;
   const release = new Map<number, () => void>();
   const runner = {
-    workerIsAlive: async () => workerAlive,
+    async recoverRun(run: Parameters<Store['interruptRun']>[0]) {
+      if (workerAlive) return false;
+      store.interruptRun(run);
+      return true;
+    },
     async execute(taskId: number) {
       const run = store.beginRun(taskId)!;
       store.updateRun(run.id, { status: 'running' });
@@ -209,4 +287,56 @@ test('holds a recovered live worker and refills exactly one freed slot', async t
   release.get(second.id)!();
   await setImmediate();
   assert.deepEqual([...release.keys()], [second.id, samePath.id, third.id]);
+});
+
+test('holds a cancelled container until Docker confirms its exit, retaining a natural exit', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'agentdesk-cancel-docker-'));
+  const store = new Store(dir);
+  t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const cfg = loadConfig({ configPath: join(dir, 'missing.json'), dataDir: dir });
+  const project = store.addProject('docker fixture', dir, 'codex', 'isolation');
+  const task = store.addTask(project.id, 'long task');
+  const run = store.beginRun(task.id)!;
+  store.updateRun(run.id, { status: 'running', worker: { kind: 'docker', id: 'first' } });
+  store.requestCancellation(task.id);
+  let reachable = false;
+  let running = true;
+  let kills = 0;
+  const finishedAt = new Date().toISOString();
+  const docker = {
+    getContainer(id: string) {
+      return {
+        async inspect() {
+          if (!reachable) throw new Error('Docker unavailable');
+          if (id === 'second') return { State: { Status: 'exited', ExitCode: 0, FinishedAt: finishedAt } };
+          return { State: running ? { Running: true } : { Status: 'exited', ExitCode: 137, FinishedAt: finishedAt } };
+        },
+        async kill() { kills++; },
+        async remove() {},
+      };
+    },
+  } as unknown as Docker;
+  const runner = new Runner({ store, docker, cfg, events: new EventBus([]) });
+  const active = () => store.getRun(run.id)!;
+  assert.equal(await runner.recoverRun(active()), false);
+  assert.match(active().cancellation?.issue ?? '', /Docker unavailable/);
+  assert.equal(store.getTask(task.id)?.status, 'running');
+  reachable = true;
+  assert.equal(await runner.recoverRun(active()), false);
+  assert.equal(await runner.recoverRun(active()), false);
+  assert.equal(kills, 1);
+  assert.equal(store.getTask(task.id)?.status, 'running');
+  running = false;
+  assert.equal(await runner.recoverRun(active()), true);
+  assert.equal(store.getTask(task.id)?.status, 'cancelled');
+  assert.equal(active().execution?.stoppedAt, finishedAt);
+
+  const nextTask = store.addTask(project.id, 'natural exit');
+  const next = store.beginRun(nextTask.id)!;
+  store.updateRun(next.id, { status: 'running', worker: { kind: 'docker', id: 'second' } });
+  const late = store.requestCancellation(nextTask.id)!;
+  assert.equal(await runner.recoverRun(late), true);
+  assert.equal(store.getTask(nextTask.id)?.status, 'done');
+  assert.equal(store.getRun(next.id)?.exit_code, 0);
+  assert.equal(kills, 1);
 });

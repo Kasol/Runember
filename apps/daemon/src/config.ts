@@ -6,10 +6,18 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
+import { savedLogDirectory } from './log-settings.js';
 
 export function loadLocalEnv(): void {
   const path = join(process.env.AGENTDESK_APP_DIR ?? process.cwd(), '.env');
   if (existsSync(path)) loadEnvFile(path);
+}
+
+export interface DingTalkReportConfig {
+  executable: string;
+  configDir: string;
+  profile?: string;
+  folder?: string;
 }
 
 export interface AppConfig {
@@ -19,12 +27,14 @@ export interface AppConfig {
   agents: Record<string, {
     image: string;
     codexHomeVolume: string;
+    /** 宿主 CLI 路径；空值自动发现桌面端内置运行时。 */
+    executable?: string;
     hostSkillsDir?: string;
     /** 全局 MCP server 注册表：项目 mcpServers 按名字从这里取配置 */
     mcp?: Record<string, { url?: string; command?: string; args?: string[] }>;
   }>;
   /** 通知渠道列表（M3 起各渠道实现读这里；M1 只有 console） */
-  notify: { channels: Array<Record<string, unknown>> };
+  notify: { channels: Array<Record<string, unknown>>; dingtalkReport?: DingTalkReportConfig };
   /** 反馈通道：把人的决定送回 daemon（钉钉 Stream = 手机闭环） */
   feedback: { dingtalkStream?: DingTalkStreamConfig };
   dataDir: string;
@@ -53,8 +63,10 @@ const DEFAULTS: AppConfig = {
         // "chrome-devtools-lab": { url: "http://host.docker.internal:9222/mcp" },
       },
     },
+    zcode: { image: '', codexHomeVolume: '' },
+    deepseek: { image: '', codexHomeVolume: '' },
   },
-  notify: { channels: [] },
+  notify: { channels: [], dingtalkReport: { executable: '', configDir: '', profile: '', folder: '' } },
   feedback: {},
   dataDir: join(homedir(), '.agentdesk'),
   logDir: '',
@@ -123,7 +135,7 @@ export function loadConfig(overrides?: { configPath?: string; dataDir?: string; 
 
   // ③ CLI 覆盖（最高优先级）
   cfg.dataDir = overrides?.dataDir ?? process.env.AGENTDESK_DATA_DIR ?? cfg.dataDir;
-  const logDir = overrides?.logDir ?? process.env.AGENTDESK_LOG_DIR ?? cfg.logDir;
+  const logDir = overrides?.logDir ?? savedLogDirectory(cfg.dataDir) ?? process.env.AGENTDESK_LOG_DIR ?? cfg.logDir;
   if (typeof logDir !== 'string') throw new Error('logDir 必须为目录路径字符串');
   cfg.logDir = resolve(cfg.dataDir, logDir);
   cfg.server.port = overrides?.port ?? cfg.server.port;
@@ -139,6 +151,11 @@ export function loadConfig(overrides?: { configPath?: string; dataDir?: string; 
     if (!Number.isSafeInteger(cfg.scheduler[key]) || cfg.scheduler[key] < 1) {
       throw new Error(`scheduler.${key} 必须为正整数`);
     }
+  }
+  const report = cfg.notify.dingtalkReport;
+  if (report?.executable && (typeof report.executable !== 'string'
+    || typeof report.configDir !== 'string' || !report.configDir.trim())) {
+    throw new Error('notify.dingtalkReport 需要有效的 executable 和 configDir');
   }
   if (!['127.0.0.1', '::1', 'localhost'].includes(cfg.server.host) &&
       (typeof cfg.server.token !== 'string' || !cfg.server.token.trim())) {

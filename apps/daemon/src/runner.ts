@@ -7,16 +7,21 @@
  *   收尾：git 改动清单 + diffstat → RunSummary；classifyRun 判终态
  */
 import Docker from 'dockerode';
-import { Writable } from 'node:stream';
-import { appendFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { Writable, type Readable } from 'node:stream';
+import { finished } from 'node:stream/promises';
+import { StringDecoder } from 'node:string_decoder';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { classifyRun, taskStatusAfterRun, AGENTCTL_MARKER, parseResultMarker, stripAgentctlLines } from '@agentdesk/core';
+import { classifyRun, taskStatusAfterRun, parseResultMarker, readRunSummary, runDetails } from '@agentdesk/core';
+import { availableTaskActions } from './actions.js';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit, hostGitOperation } from './hostgit.js';
 import { MergeBlocked, runMerge } from './merge.js';
 import { prepareMcpConfig } from './mcp.js';
-import { findHostCodex, hostCodexLoginStatus, hostCodexProxyEnv, runNative } from './native.js';
+import { hostCodexLoginStatus, hostCodexProxyEnv } from './native.js';
+import { findNativeAgent, prepareNativeAgent, runtimeConfig } from './agent-runtime.js';
+import { nativeExecution, runManagedNative, stoppedNativeGroup } from './managed-native.js';
 import type { Task, Project, Run, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -26,7 +31,8 @@ export interface RunnerDeps {
   events: import('./notify.js').EventBus;
 }
 
-interface SpawnResult { exitCode: number; killed: boolean; out: string[]; err: string[] }
+interface SpawnResult { exitCode: number | null; killed: boolean; out: string[]; err: string[]; execution?: Run['execution']; oomKilled?: boolean }
+type RunResult = ReturnType<typeof classifyRun> | { status: 'cancelled'; blockedKind?: undefined; inputRequest?: undefined };
 
 /** Windows 绝对路径 → docker bind 格式（正斜杠） */
 function toBind(path: string): string {
@@ -35,9 +41,10 @@ function toBind(path: string): string {
 
 function lineSink(onLine: (l: string) => void): Writable {
   let buf = '';
+  const decoder = new StringDecoder('utf8');
   return new Writable({
     write(chunk, _enc, cb) {
-      buf += chunk.toString('utf8');
+      buf += decoder.write(chunk);
       let nl: number;
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).replace(/\r+$/, '');
@@ -46,12 +53,20 @@ function lineSink(onLine: (l: string) => void): Writable {
       }
       cb();
     },
-    final(cb) { if (buf.trim()) onLine(buf); cb(); },
+    final(cb) { buf += decoder.end(); if (buf.trim()) onLine(buf); cb(); },
   });
 }
 
 export class Runner {
+  private stopping = new Map<number, Promise<void>>();
+
   constructor(private deps: RunnerDeps) {}
+
+  private projectForTask(task: Task): Project {
+    const project = this.deps.store.getProject(task.project_id)!;
+    return { ...project, agent_id: task.agent_id ?? 'codex', model: task.model,
+      execution: task.execution ?? project.execution ?? 'capability' };
+  }
 
   private getSpawnBinds(project: Project, agentHomeVolume: string): string[] {
     return [
@@ -67,6 +82,7 @@ export class Runner {
     image: string; cmd: string[]; binds: string[]; env: string[];
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
     onContainer?: (id: string) => void;
+    beforeStart?: (id: string) => boolean;
   }): Promise<SpawnResult> {
     const { docker } = this.deps;
     const out: string[] = [];
@@ -89,21 +105,41 @@ export class Runner {
         SecurityOpt: ['seccomp=unconfined'], // bwrap 需要 userns（M0 实测）
       },
     });
-    opts.onContainer?.(container.id);
-    await container.start();
-    const stream = await container.logs({ follow: true, stdout: true, stderr: true });
-    docker.modem.demuxStream(
-      stream,
-      lineSink(l => { out.push(l); opts.onStdoutLine?.(l); }),
-      lineSink(l => err.push(l)),
-    );
     let killed = false;
-    const timer = setTimeout(() => { killed = true; void container.kill().catch(() => {}); }, opts.timeoutMs);
-    const wait = await container.wait();
-    clearTimeout(timer);
-    try { (stream as any).destroy?.(); } catch { /* noop */ }
-    try { await container.remove(); } catch { /* noop */ }
-    return { exitCode: wait.StatusCode ?? -1, killed, out, err };
+    let stream: Readable | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    let logTimer: NodeJS.Timeout | undefined;
+    try {
+      if (opts.beforeStart && !opts.beforeStart(container.id)) {
+        return { exitCode: null, killed, out, err, execution: this.cancelledExecution() };
+      }
+      await container.start();
+      opts.onContainer?.(container.id);
+      timer = setTimeout(() => { killed = true; void container.kill().catch(() => {}); }, opts.timeoutMs);
+      stream = await container.logs({ follow: true, stdout: true, stderr: true }) as Readable;
+      const stdout = lineSink(l => { out.push(l); opts.onStdoutLine?.(l); });
+      const stderr = lineSink(l => err.push(l));
+      const drained = finished(stream, { cleanup: true }).catch(error => {
+        err.push(`读取容器日志异常：${(error as Error).message}`);
+      });
+      docker.modem.demuxStream(stream, stdout, stderr);
+      const wait = await container.wait();
+      const stoppedAt = new Date().toISOString();
+      clearTimeout(timer);
+      logTimer = setTimeout(() => stream?.destroy(), 1000);
+      await drained;
+      stdout.end();
+      stderr.end();
+      const oomKilled = opts.beforeStart && wait.StatusCode === 137 ? (await container.inspect()).State.OOMKilled : false;
+      return { exitCode: wait.StatusCode ?? null, killed, out, err,
+        execution: { stoppedAt, exitCode: wait.StatusCode ?? null, timedOut: killed }, oomKilled };
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(logTimer);
+      stream?.destroy();
+      // Execution containers retain Docker's exit evidence until the Run is settled.
+      if (!opts.beforeStart) await container.remove({ force: true }).catch(() => {});
+    }
   }
 
   private proxyEnv(): string[] {
@@ -183,16 +219,77 @@ export class Runner {
   private async runNativePath(opts: {
     adapterImage: string; cmd: string[]; cwd: string; env: string[];
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+    control: string;
     onPid: (pid: number) => void;
-  }): Promise<{ exitCode: number; killed: boolean; out: string[]; err: string[] }> {
-    // 命令映射：容器内 'codex ...' → 宿主实际发现的 codex 可执行路径
-    const hostCodex = findHostCodex();
-    if (!hostCodex) throw new Error('宿主 codex CLI 未找到（findHostCodex）');
-    const cmd = opts.cmd[0] === 'codex' ? [hostCodex, ...opts.cmd.slice(1)] : opts.cmd;
-    return runNative({
-      cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
+  }): Promise<SpawnResult> {
+    const main = await runManagedNative({
+      cmd: opts.cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
       onStdoutLine: opts.onStdoutLine,
-    }, child => { if (child.pid) opts.onPid(child.pid); });
+    }, opts.control, opts.onPid);
+    const execution = nativeExecution(opts.control);
+    if (!execution && existsSync(opts.control + '.active')) throw new Error('宿主进程树停止结果无法核实');
+    return {
+      ...main, exitCode: execution?.exitCode ?? null, killed: !!execution?.timedOut,
+      execution: execution ?? { stoppedAt: new Date().toISOString(), exitCode: null, error: main.err.at(-1) },
+    };
+  }
+
+  private cancelledExecution(): NonNullable<Run['execution']> {
+    return { stoppedAt: new Date().toISOString(), exitCode: null, cancelled: true };
+  }
+
+  private updateCancellation(runId: number, patch: Partial<NonNullable<Run['cancellation']>>): void {
+    const current = this.deps.store.getRun(runId);
+    if (current?.cancellation && (current.status === 'starting' || current.status === 'running')) {
+      const cancellation = { ...current.cancellation, ...patch };
+      if (cancellation.issue !== current.cancellation.issue || cancellation.killSent !== current.cancellation.killSent) {
+        this.deps.store.updateRun(runId, { cancellation });
+      }
+    }
+  }
+
+  /** Recovery never signals a persisted PID. */
+  requestStop(run: Run): Promise<void> {
+    if (!run.cancellation || run.execution) return Promise.resolve();
+    const pending = this.stopping.get(run.id);
+    if (pending) return pending;
+    const stop = this.stopWorker(run).catch(error => {
+      this.updateCancellation(run.id, { issue: `无法确认停止：${(error as Error).message}` });
+    }).finally(() => this.stopping.delete(run.id));
+    this.stopping.set(run.id, stop);
+    return stop;
+  }
+
+  private async stopWorker(run: Run): Promise<void> {
+    const worker = run.worker;
+    if (!worker) {
+      this.updateCancellation(run.id, { issue: '等待当前准备步骤退出。' });
+      return;
+    }
+    if (worker.kind === 'native') {
+      if (!worker.control) {
+        this.updateCancellation(run.id, { issue: '此 Run 缺少可验证的进程树控制记录，正在等待执行器退出。' });
+        return;
+      }
+      const request = worker.control + '.cancel';
+      if (!existsSync(request)) writeFileSync(request, '', { mode: 0o600 });
+      this.updateCancellation(run.id, { issue: nativeExecution(worker.control) ? undefined : '等待确认宿主进程树全部退出。' });
+      return;
+    }
+    if (run.status !== 'running' || run.cancellation?.killSent) return;
+    const container = this.deps.docker.getContainer(worker.id);
+    this.updateCancellation(run.id, { issue: '正在向 Docker 核实容器状态。' });
+    const state = await container.inspect({ abortSignal: AbortSignal.timeout(3000) }).then(info => info.State, error => {
+      if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+    });
+    if (!(state?.Running || state?.Restarting)) return;
+    try {
+      await container.kill({ signal: 'SIGKILL', abortSignal: AbortSignal.timeout(3000) });
+      this.updateCancellation(run.id, { killSent: true, issue: '等待容器确认退出。' });
+    } catch (error) {
+      if (![304, 404, 409].includes((error as { statusCode?: number }).statusCode ?? 0)) throw error;
+      this.updateCancellation(run.id, { issue: '等待 Docker 确认容器的最终状态。' });
+    }
   }
 
   async workerIsAlive(worker: Run['worker']): Promise<boolean> {
@@ -209,14 +306,106 @@ export class Runner {
     }
   }
 
+  async recoverRun(run: Run): Promise<boolean> {
+    const { store, docker } = this.deps;
+    if (run.status !== 'starting' && run.status !== 'running') return true;
+    let execution = run.execution;
+    const worker = run.worker;
+    if (!execution && worker?.kind === 'native' && worker.control) {
+      if (run.cancellation) await this.requestStop(run);
+      execution = nativeExecution(worker.control);
+      const active = existsSync(worker.control + '.active');
+      if (!execution && !active && worker.pid === 0 && existsSync(worker.control + '.cancel')) {
+        execution = this.cancelledExecution();
+      }
+      const supervisorAlive = !execution && worker.pid > 0 && await this.workerIsAlive(worker);
+      if (!execution && (active || supervisorAlive)) {
+        if (!supervisorAlive && worker.pid > 0) {
+          try {
+            if (await stoppedNativeGroup(worker.control, this.deps.cfg.dataDir)) {
+              execution = nativeExecution(worker.control);
+              if (!execution && !run.cancellation) { store.interruptRun(run); return true; }
+              execution ??= { ...this.cancelledExecution(), error: 'daemon 中断后确认了原进程树已退出。' };
+            } else {
+              this.updateCancellation(run.id, { issue: '进程监管器已退出，正在核对受管进程树。' });
+            }
+          } catch (error) {
+            this.updateCancellation(run.id, { issue: `无法核实受管进程树：${(error as Error).message}` });
+          }
+        }
+        if (!execution) return false;
+      }
+    } else if (!execution && worker?.kind === 'docker') {
+      const container = docker.getContainer(worker.id);
+      let state;
+      try { state = (await container.inspect({ abortSignal: AbortSignal.timeout(3000) })).State; }
+      catch (error) {
+        if ((error as { statusCode?: number }).statusCode !== 404) {
+          this.updateCancellation(run.id, { issue: `无法向 Docker 核实容器状态：${(error as Error).message}` });
+          return false;
+        }
+      }
+      if (state?.Running || state?.Restarting || state?.Paused) {
+        if (run.cancellation) await this.requestStop({ ...run, status: 'running' });
+        return false;
+      }
+      if (state?.Status === 'created') {
+        try { await container.remove({ abortSignal: AbortSignal.timeout(3000) }); }
+        catch (error) {
+          if ((error as { statusCode?: number }).statusCode !== 404) {
+            this.updateCancellation(run.id, { issue: 'Docker 正在核对容器的启动与取消顺序。' });
+            return false;
+          }
+        }
+        execution = run.cancellation ? this.cancelledExecution()
+          : { stoppedAt: new Date().toISOString(), exitCode: null, error: 'Docker 容器尚未启动。' };
+      } else if (state?.Status === 'exited' || state?.Status === 'dead') {
+        const cancelled = !!run.cancellation?.killSent && state.ExitCode === 137 && !state.OOMKilled;
+        execution = { exitCode: state.ExitCode, stoppedAt: state.FinishedAt, cancelled };
+      } else if (state) {
+        this.updateCancellation(run.id, { issue: `Docker 返回了尚无法确认停止的状态：${state.Status}。` });
+        return false;
+      }
+    } else if (!execution && await this.workerIsAlive(worker)) {
+      if (run.cancellation) await this.requestStop(run);
+      return false;
+    }
+    if (!execution && !worker && run.cancellation) execution = this.cancelledExecution();
+    if (!execution) { store.interruptRun(run); return true; }
+
+    const task = store.getTask(run.task_id)!;
+    const project = this.projectForTask(task);
+    const summary: RunSummary = readRunSummary(run) ?? {
+      diagnostic: execution.error ?? 'daemon 重启后核对了执行器的退出结果。', filesChanged: [], diffStat: '',
+    };
+    const record = (line: string) => {
+      if (!run.log_path) return;
+      try { appendFileSync(run.log_path, line); }
+      catch (error) { console.error('无法写入 Run 恢复日志', error); }
+    };
+    let result: RunResult;
+    if (execution.cancelled) result = { status: 'cancelled' };
+    else if (run.blocked_kind && run.blocked_kind !== 'unknown_error') result = { status: 'blocked', blockedKind: run.blocked_kind };
+    else result = classifyRun({
+      exitCode: execution.exitCode, killed: !!execution.timedOut, lastAgentText: summary.agentMessage ?? '',
+      inputRequest: summary.inputRequest, errTail: execution.error ?? '',
+    });
+    await this.audit(project, run.checkpoint_sha ?? '', summary, record);
+    this.finish(task, project, run.id, result, summary, run.log_path ?? undefined, execution);
+    if (worker?.kind === 'docker') await docker.getContainer(worker.id).remove().catch(() => {});
+    return true;
+  }
+
   async execute(taskId: number): Promise<void> {
-    const { cfg, store, events } = this.deps;
+    const { store, events } = this.deps;
+    const cfg = runtimeConfig(this.deps.cfg, store);
     const task = store.getTask(taskId)!;
-    const project = store.getProject(task.project_id)!;
+    const project = this.projectForTask(task);
     const run = store.beginRun(task.id);
     if (!run) return;
     const kind = run.kind;
     const runsDir = join(cfg.logDir, 'runs');
+    store.updateRun(run.id, { started_at: new Date().toISOString() });
     // 独立数据库可能共用日志目录，run ID 只在当前数据库内唯一。
     const logPath = join(runsDir, `run-${run.id}-${randomUUID()}.jsonl`);
     try {
@@ -225,9 +414,9 @@ export class Runner {
         { flag: 'wx', mode: 0o600 });
     } catch (error) {
       return this.finish(task, project, run.id, { status: 'failed', blockedKind: 'unknown_error' },
-        { agentMessage: `无法创建任务日志 ${logPath}：${(error as Error).message}`, filesChanged: [], diffStat: '' });
+        { diagnostic: `无法创建任务日志 ${logPath}：${(error as Error).message}`, filesChanged: [], diffStat: '' });
     }
-    store.updateRun(run.id, { status: 'running', started_at: new Date().toISOString(), log_path: logPath });
+    store.updateRun(run.id, { log_path: logPath });
     events.emit({ kind: 'run.started', runId: run.id, task, project });
 
     let logWriteFailed = false;
@@ -239,10 +428,17 @@ export class Runner {
         console.error(`无法写入任务日志 ${logPath}`, error);
       }
     };
+    const stopBeforeExecution = () => {
+      if (!store.getRun(run.id)?.cancellation) return false;
+      this.finish(task, project, run.id, { status: 'cancelled' },
+        { diagnostic: '已在启动 Agent 前停止。', filesChanged: [], diffStat: '' }, logPath, this.cancelledExecution());
+      return true;
+    };
     const merge = store.getMerge(task.id);
     if (merge) {
       try {
         if (project.execution === 'isolation') throw new MergeBlocked('自动化合并需要 capability 项目');
+        store.updateRun(run.id, { status: 'running' });
         const result = await runMerge({
           cwd: project.workspace_path,
           worktree: resolve(cfg.dataDir, 'merge-worktrees', String(task.id)),
@@ -277,12 +473,14 @@ export class Runner {
     let effectiveImage: string = adapter.image;
     // capability 模式：codex 直接跑宿主——auth/skills/MCP 全部原生（宿主 ~/.codex），
     // 跳过播种/渲染/预装/凭证容器检查（那些是隔离模式的容器环境准备工作）。
-    const execution = project.execution ?? 'capability';
-    const isCapability = execution === 'capability';
+    const executionMode = project.execution ?? 'capability';
+    const isCapability = executionMode === 'capability';
     let cleanupConfig: (() => void) | undefined;
+    let cleanupAgent: (() => void) | undefined;
 
     try {
       if (!isCapability) {
+        if (project.agent_id !== 'codex') throw new Error(`${project.agent_id} 当前仅支持能力优先模式，请使用 capability。`);
         // ══ isolation 模式的容器环境准备 ══
         await this.seedSkills(adapter.homeVolume);
         await this.ensureVolume(adapter.homeVolume);
@@ -307,30 +505,34 @@ export class Runner {
           env: [], timeoutMs: 60_000, tag: `auth-${run.id}`,
         });
         if (auth.exitCode !== 0) {
-          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-            { agentMessage: '凭证缺失：请先 agentdesk auth ' + project.agent_id, filesChanged: [], diffStat: '' }, logPath, auth.exitCode);
+          if (stopBeforeExecution()) return;
+          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: auth.killed ? 'timeout' : 'auth_missing' },
+            { diagnostic: auth.killed ? '隔离执行器的认证检查超时。' : '凭证缺失，请先运行 desk auth。', filesChanged: [], diffStat: '' }, logPath);
         }
       } else {
         // ══ capability 模式的宿主环境自检 ══
         // codex CLI：发现宿主可用版本（PATH 优先 → GUI 私有运行时最新版）
-        const hostCodex = findHostCodex();
-        if (!hostCodex) {
-          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-            { agentMessage: '宿主上未发现 codex CLI（PATH 无 codex，且未找到 GUI 运行时）。请安装 codex CLI 后重试。', filesChanged: [], diffStat: '' }, logPath, undefined);
+        const native = findNativeAgent(project.agent_id, cfg);
+        if (!native) {
+          return this.finish(task, project, run.id, { status: 'failed', blockedKind: 'unknown_error' },
+            { diagnostic: `宿主上未发现 ${project.agent_id} CLI。请安装对应客户端或配置 agents.${project.agent_id}.executable。`, filesChanged: [], diffStat: '' }, logPath);
         }
-        const status = await hostCodexLoginStatus(hostCodex, cfg.proxy);
-        if (status.exitCode !== 0) {
-          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: 'auth_missing' },
-            { agentMessage: '宿主 Codex 无法确认登录。请用当前运行账号执行 desk auth，再继续任务。', filesChanged: [], diffStat: '' }, logPath, undefined);
+        const status = project.agent_id === 'codex' ? await hostCodexLoginStatus(native.command[0]!, cfg.proxy) : undefined;
+        if (status && status.exitCode !== 0) {
+          if (stopBeforeExecution()) return;
+          return this.finish(task, project, run.id, { status: 'blocked', blockedKind: status.killed ? 'timeout' : 'auth_missing' },
+            { diagnostic: status.killed ? '宿主 Codex 认证检查超时。' : '宿主 Codex 无法确认登录。请用当前运行账号执行 desk auth。', filesChanged: [], diffStat: '' }, logPath);
         }
       }
 
       // ② checkpoint：宿主侧执行（继承用户 LFS/filemode 配置，容器不再触碰 .git）
+      if (stopBeforeExecution()) return;
       const cp = await hostCheckpoint(project.workspace_path, task.id);
+      if (stopBeforeExecution()) return;
       const continuingGit = !!cp.gitOperation && isCapability && kind === 'resume';
       if (!cp.ok && !continuingGit) {
         return this.finish(task, project, run.id, { status: 'blocked', blockedKind: cp.gitOperation ? 'git_in_progress' : 'unknown_error' },
-          { agentMessage: `checkpoint 失败：${cp.error}`, filesChanged: [], diffStat: '' }, logPath, undefined);
+          { diagnostic: `checkpoint 失败：${cp.error}`, blocker: cp.error, filesChanged: [], diffStat: '' }, logPath);
       }
       const anchor = cp.ok ? cp.anchor : '';
       if (continuingGit) {
@@ -343,115 +545,180 @@ export class Runner {
       // ③ 主执行：resume（带反馈+旧会话）或 normal
       const feedback = task.pending_feedback;
       const priorSession = feedback ? store.lastSessionOfTask(task.id) : undefined;
+      let responseSchemaPath: string | undefined;
+      if (adapter.finalResponseSchema) {
+        const directory = join(cfg.dataDir, 'schemas');
+        mkdirSync(directory, { recursive: true });
+        const hostPath = resolve(directory, `${adapter.id}-final-response.json`);
+        const schema = JSON.stringify(adapter.finalResponseSchema);
+        if (!existsSync(hostPath) || readFileSync(hostPath, 'utf8') !== schema) {
+          writeFileSync(hostPath, schema, { mode: 0o600 });
+        }
+        responseSchemaPath = isCapability ? hostPath : '/agentdesk-final-response.json';
+        if (!isCapability) binds.push(`${toBind(hostPath)}:${responseSchemaPath}:ro`);
+      }
       const cmd = priorSession && feedback
-        ? adapter.buildResumeArgs(priorSession, feedback, execution)
-        : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, execution);
+        ? adapter.buildResumeArgs(priorSession, feedback, executionMode, responseSchemaPath, project.model || undefined)
+        : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, executionMode, responseSchemaPath, project.model || undefined);
 
       let sessionId: string | undefined;
       let lastAgentText = '';
       let lastAgentError = '';
+      let lastAgentModel: string | undefined;
+      let inputRequest: string | undefined;
+      let replyInputRequest: string | undefined;
+      let warnedActivityWrite = false;
       const isNative = isCapability; // capability = 宿主原生执行
       // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
       const nativeEnv = hostCodexProxyEnv(cfg.proxy);
+      const native = isNative ? prepareNativeAgent({ id: project.agent_id, cmd, model: project.model, cwd: project.workspace_path, runId: run.id, cfg }) : undefined;
+      if (native) { cleanupAgent = native.cleanup; nativeEnv.push(...native.env); }
+      const control = logPath + '.control';
       const onLine = (line: string) => {
         record(line + '\n');
-        const ev = adapter.parseLine(line);
+        const ev = adapter.parseLine(line, !!responseSchemaPath);
         if (!ev) return;
-        if (ev.type === 'session' && ev.sessionId && !sessionId) {
+        if (ev.activity) {
+          try { store.recordRunActivity(run.id, { ...ev.activity, at: new Date().toISOString() }); }
+          catch (error) {
+            if (!warnedActivityWrite) console.warn(`Run #${run.id} 记录活动失败:`, (error as Error).message);
+            warnedActivityWrite = true;
+          }
+        }
+        if (ev.model) lastAgentModel = ev.model;
+        if (ev.sessionId && !sessionId) {
           sessionId = ev.sessionId;
           store.updateRun(run.id, { session_id: sessionId });
         }
-        if (ev.type === 'agent_message' && ev.text) lastAgentText = ev.text;
+        if (ev.type === 'agent_message' && ev.text !== undefined) {
+          lastAgentText = ev.text;
+          replyInputRequest = ev.inputRequest;
+        }
         if (ev.type === 'error' && ev.text) lastAgentError = ev.text;
+        if (ev.type === 'input_requested' && ev.text?.trim()) inputRequest = ev.text;
       };
+      if (isNative) store.updateRun(run.id, { worker: { kind: 'native', pid: 0, control } });
       const main = isNative
         ? await this.runNativePath({
-            adapterImage: adapter.image, cmd,
+            adapterImage: adapter.image, cmd: native!.cmd,
             cwd: project.workspace_path, env: nativeEnv,
             timeoutMs: tmo, tag: `run-${run.id}`,
+            control,
             onStdoutLine: onLine,
-            onPid: pid => store.updateRun(run.id, { worker: { kind: 'native', pid } }),
+            onPid: pid => store.updateRun(run.id, { status: 'running', worker: { kind: 'native', pid, control } }),
           })
         : await this.spawn({
             image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
             onStdoutLine: onLine,
-            onContainer: id => store.updateRun(run.id, { worker: { kind: 'docker', id } }),
+            beforeStart: id => {
+              store.updateRun(run.id, { worker: { kind: 'docker', id } });
+              return !store.getRun(run.id)?.cancellation;
+            },
+            onContainer: id => store.updateRun(run.id, { status: 'running', worker: { kind: 'docker', id } }),
           });
       for (const l of main.err) record('[stderr] ' + l + '\n');
 
-      // ④ 收尾：有未结束的 Git 操作时，留给用户根据草案继续。
-      let result = classifyRun({
+      // ④ 收尾：记录运行结果与工作区观察。
+      const execution = main.execution!;
+      // Record the exit before awaiting container stop receipts or auditing the workspace.
+      store.updateRun(run.id, { execution });
+      await this.stopping.get(run.id);
+      if (!isNative && !main.oomKilled && !execution.timedOut && execution.exitCode === 137
+        && store.getRun(run.id)?.cancellation?.killSent) {
+        execution.cancelled = true;
+      }
+      const result: RunResult = execution.cancelled ? { status: 'cancelled' } : classifyRun({
         exitCode: main.exitCode,
         killed: main.killed,
+        interrupted: main.exitCode === null && !!store.getRun(run.id)?.worker,
         lastAgentText,
+        inputRequest: inputRequest ?? replyInputRequest,
         errTail: [...main.err.slice(-20), lastAgentError].join('\n'),
       });
-      const pendingGit = isCapability ? await hostGitOperation(project.workspace_path) : undefined;
-      const { filesChanged, diffStat } = await hostAudit(project.workspace_path, pendingGit ? '' : anchor);
       // 旧会话仍可能报告部分完成，保留未完成项供续跑。
       const report = parseResultMarker(lastAgentText);
       const summary: RunSummary = {
-        agentMessage: result.status === 'blocked' ? lastAgentText || undefined
-          : stripAgentctlLines(lastAgentText).trim() || report?.summary || undefined,
-        filesChanged, diffStat, sessionId,
+        agentId: project.agent_id, model: lastAgentModel ?? project.model ?? undefined,
+        agentMessage: lastAgentText || report?.summary,
+        filesChanged: [], diffStat: '', sessionId,
         partial: report ? !report.done : undefined,
         remaining: report?.remaining,
+        inputRequest: result.inputRequest,
       };
-      if (pendingGit && result.status === 'succeeded') {
-        const reason = `Git 操作暂停（${pendingGit}）。请查看任务详情中的处理方案，再确认是否继续。`;
-        record(`# ${reason}\n`);
-        summary.agentMessage = [reason, summary.agentMessage].filter(Boolean).join('\n\n');
-        result = { status: 'blocked', blockedKind: 'git_in_progress' };
+      if (execution.error || (main.exitCode === null && result.status === 'failed')) {
+        summary.diagnostic = execution.error ?? main.err.at(-1);
+      } else if (lastAgentError && main.exitCode !== 0) {
+        summary.diagnostic = lastAgentError;
       }
-      this.finish(task, project, run.id, result, summary, logPath, main.exitCode);
+      store.updateRun(run.id, { execution, blocked_kind: result.blockedKind, summary_json: JSON.stringify(summary) });
+      await this.audit(project, anchor, summary, record);
+      this.finish(task, project, run.id, result, summary, logPath, execution);
+      const worker = store.getRun(run.id)?.worker;
+      if (worker?.kind === 'docker') await this.deps.docker.getContainer(worker.id).remove().catch(() => {});
     } catch (e: any) {
+      record(`# 执行器异常：${e?.message ?? e}\n`);
+      const current = store.getRun(run.id);
+      if (current?.worker || current?.execution) {
+        this.updateCancellation(run.id, { issue: e?.message ?? String(e) });
+        throw e;
+      }
+      if (stopBeforeExecution()) return;
       this.finish(task, project, run.id,
         { status: 'failed', blockedKind: 'unknown_error' },
-        { agentMessage: `runner 异常: ${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath, undefined);
+        { diagnostic: `执行器异常：${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath);
     } finally {
       cleanupConfig?.();
+      cleanupAgent?.();
+    }
+  }
+
+  private async audit(project: Project, anchor: string, summary: RunSummary, record: (line: string) => void): Promise<void> {
+    try {
+      const pendingGit = await hostGitOperation(project.workspace_path);
+      if (pendingGit) {
+        summary.blocker = `工作目录还有未结束的 Git 操作（${pendingGit}）。`;
+        record(`# ${summary.blocker}\n`);
+      }
+      Object.assign(summary, await hostAudit(project.workspace_path, pendingGit ? '' : anchor));
+    } catch (error) {
+      const message = `工作区审计失败：${(error as Error).message}`;
+      record(`# ${message}\n`);
+      summary.diagnostic = [summary.diagnostic, message].filter(Boolean).join('\n');
     }
   }
 
   private finish(
     task: Task, project: Project, runId: number,
-    result: ReturnType<typeof classifyRun>, summary: RunSummary, logPath?: string, exitCode?: number,
+    result: RunResult, summary: RunSummary, logPath?: string, execution?: Run['execution'] | number,
   ): void {
     const { store, events } = this.deps;
     const retryViaCli = !!store.getMerge(task.id);
+    summary.agentId = project.agent_id;
     store.finishRun(runId, {
       status: result.status,
-      exit_code: exitCode,
+      exit_code: typeof execution === 'number' ? execution : execution?.exitCode ?? undefined,
+      execution: typeof execution === 'object' ? execution : undefined,
       blocked_kind: result.blockedKind,
       summary_json: JSON.stringify(summary),
       ended_at: new Date().toISOString(),
       log_path: logPath,
-    }, taskStatusAfterRun(task, store.getRun(runId)!, result),
-    result.status === 'succeeded' && summary.partial ? summary.remaining ?? '（agent 未给出明细）' : null);
+    }, result.status === 'cancelled' ? 'cancelled' : taskStatusAfterRun(result),
+    result.status === 'succeeded' && summary.partial ? summary.remaining ?? null : null);
 
-    if (result.status === 'succeeded') events.emit({ kind: 'run.succeeded', runId, task, project, summary });
-    else if (result.status === 'blocked') {
-      // 从协议标记行提取人话问题：###AGENTCTL_BLOCKED### {"question":"..."}
-      let question = result.reason ?? (stripAgentctlLines(summary.agentMessage ?? '') || undefined);
-      if (result.blockedKind === 'git_in_progress') question = question?.split('\n\n', 1)[0];
-      if (result.blockedKind === 'missing_result') question = 'Codex 已退出，但没有返回任务答复。请查看日志后决定是否续跑。';
-      const markerLine = summary.agentMessage?.split('\n').find(l => l.includes(AGENTCTL_MARKER));
-      if (markerLine) {
-        try {
-          const j = JSON.parse(markerLine.slice(markerLine.indexOf(AGENTCTL_MARKER) + AGENTCTL_MARKER.length).trim());
-          question = typeof j.question === 'string' ? j.question : typeof j.reason === 'string' ? j.reason : question;
-        } catch { question = markerLine.slice(0, 300); }
+    const saved = store.getTask(task.id) ?? task;
+    const event = { runId, task: saved, project, details: runDetails(store.getRun(runId)!, project.agent_id, saved.partial_remaining),
+      actions: availableTaskActions(store, saved, 'dingtalk') };
+    if (result.status === 'cancelled') {
+      if (logPath) {
+        try { appendFileSync(logPath, `# Run #${runId} 已取消 · ${event.details.stoppedAt}\n`); }
+        catch (error) { console.error('无法写入 Run 停止日志', error); }
       }
-      // 循环熔断：60 分钟内该任务 blocked ≥3 次 → 不再自动接受 resume 循环，
-      // 通知升级为"需要人工介入环境"，防止昨晚式 20 连问
-      const recentBlocks = store.runsOfTask(task.id)
-        .filter(r => r.status === 'blocked' && r.ended_at
-          && Date.now() - new Date(r.ended_at).getTime() < 60 * 60 * 1000).length;
-      const loopCount = recentBlocks; // 含本次
-      if (loopCount >= 3) {
-        question = `⏸️ 该任务 1 小时内已阻塞 ${loopCount} 次（环境问题循环）。\n\n最新问题：${question ?? '（见日志）'}\n\n建议：先修复环境（缺工具/缺依赖/MCP 未接入）再 resume；或 resume 时明确授权降级方案。`;
-      }
-      events.emit({ kind: 'run.blocked', runId, task, project, blockedKind: result.blockedKind!, question, retryViaCli });
-    } else events.emit({ kind: 'run.failed', runId, task, project, reason: summary.agentMessage ?? 'unknown', retryViaCli });
+      events.emit({ ...event, kind: 'run.cancelled', summary });
+    }
+    else if (result.status === 'succeeded') events.emit({ ...event, kind: 'run.succeeded', summary });
+    else if (result.status === 'blocked') events.emit({
+      ...event, kind: 'run.blocked', blockedKind: result.blockedKind!, summary, retryViaCli,
+    });
+    else events.emit({ ...event, kind: 'run.failed', reason: summary.diagnostic ?? summary.agentMessage ?? '执行异常', retryViaCli });
   }
 }

@@ -3,26 +3,34 @@
  * M1 = ConsoleNotifier；M3 = DingTalkNotifier（配置 notify.channels 即启用）。
  */
 import { EventEmitter } from 'node:events';
-import type { Notifier, NotifyEvent } from '@agentdesk/core';
+import type { Notifier, NotifyEvent, UiLanguage } from '@agentdesk/core';
+import { TASK_STATE_LABELS } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
+import type { ReportLink } from './dingtalk-reports.js';
 
 export { DedupedNotifier };
 
 export class EventBus {
   private bus = new EventEmitter();
+  private pending = new Set<Promise<void>>();
 
   constructor(notifiers: Notifier[]) {
     this.bus.on('event', (event: NotifyEvent) => {
       for (const n of notifiers) {
-        n.notify(event).catch(e => console.error(`[notify:${n.name}] 发送失败:`, e?.message ?? e));
+        const sent = n.notify(event).catch(e => console.error(`[notify:${n.name}] 发送失败:`, e?.message ?? e));
+        this.pending.add(sent);
+        void sent.finally(() => this.pending.delete(sent));
       }
     });
   }
 
   emit(event: NotifyEvent): void {
     this.bus.emit('event', event);
+  }
+  async drain(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled(this.pending);
   }
 }
 
@@ -32,20 +40,10 @@ export class ConsoleNotifier extends DedupedNotifier {
 
   protected async send(event: NotifyEvent): Promise<void> {
     const t = `任务#${event.task.id}[${event.project.name}]`;
-    switch (event.kind) {
-      case 'run.started':
-        console.log(`🔔 ${t} 开始执行`);
-        break;
-      case 'run.succeeded':
-        console.log(`✅ ${t} 完成 —— ${event.summary.agentMessage?.slice(0, 120) ?? ''}`);
-        break;
-      case 'run.blocked':
-        console.log(`⚠️  ${t} 阻塞(${event.blockedKind})${event.question ? '：' + event.question : ''}`);
-        break;
-      case 'run.failed':
-        console.log(`❌ ${t} 失败：${event.reason}`);
-        break;
-    }
+    const state = event.kind === 'run.started' ? 'running' : event.kind === 'run.cancelled' ? 'cancelled'
+      : event.details?.confirmation ? 'awaiting_confirmation' : 'ended';
+    const detail = event.details?.confirmation ?? event.details?.stage ?? '';
+    console.log(`${TASK_STATE_LABELS[state]} ${t}${detail ? ' · ' + detail : ''}`);
   }
 }
 
@@ -54,6 +52,8 @@ export function buildNotifiers(
   channels: Array<Record<string, unknown>>,
   publicUrl: string,
   appCreds?: { clientId: string; clientSecret: string },
+  reportLink?: ReportLink,
+  language: (conversation?: string) => UiLanguage = () => 'zh-CN',
 ): Notifier[] {
   const list: Notifier[] = [new ConsoleNotifier()];
   for (const ch of channels) {
@@ -64,6 +64,8 @@ export function buildNotifiers(
         { access_token: token, secret: ch.secret ? String(ch.secret) : undefined,
           events: ch.events as string[] | undefined, atAll: !!ch.atAll },
         publicUrl,
+        reportLink,
+        () => language(),
       ));
     } else if (ch.type === 'dingtalk-app') {
       // 单机器人双职责渠道：复用 feedback.dingtalkStream 的应用凭证主动推群
@@ -75,6 +77,8 @@ export function buildNotifiers(
           conversationId: typeof ch.conversationId === 'string' ? ch.conversationId : undefined,
           robotCode: typeof ch.robotCode === 'string' ? ch.robotCode : undefined,
         },
+        reportLink,
+        () => language(typeof ch.conversationId === 'string' ? ch.conversationId : undefined),
       ));
     } else {
       console.warn(`[notify] 未知渠道类型: ${String(ch.type)}，已跳过`);

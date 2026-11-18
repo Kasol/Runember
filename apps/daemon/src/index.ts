@@ -9,6 +9,8 @@ import Docker from 'dockerode';
 import { loadConfig, loadLocalEnv } from './config.js';
 import { Store } from './store.js';
 import { EventBus, buildNotifiers } from './notify.js';
+import { DingTalkReports } from './dingtalk-reports.js';
+import { DingTalkLanguage } from './dingtalk-language.js';
 import { Runner } from './runner.js';
 import { Scheduler } from './scheduler.js';
 import { buildServer } from './server.js';
@@ -65,12 +67,16 @@ async function main(): Promise<void> {
   if (cfg.proxy.httpsProxy || cfg.proxy.httpProxy) console.log('  已配置容器代理');
 
   const store = new Store(cfg.dataDir);
+  const languages = new DingTalkLanguage(store);
+  const reports = cfg.notify.dingtalkReport?.executable ? new DingTalkReports(cfg.notify.dingtalkReport, store, cfg.logDir) : undefined;
   const notifiers = buildNotifiers(
     cfg.notify.channels,
     cfg.server.publicUrl,
     cfg.feedback.dingtalkStream?.clientId
       ? { clientId: cfg.feedback.dingtalkStream.clientId, clientSecret: cfg.feedback.dingtalkStream.clientSecret }
       : undefined,
+    reports?.publish,
+    languages.notification,
   );
   const events = new EventBus(notifiers);
   const docker = new Docker();
@@ -90,7 +96,7 @@ async function main(): Promise<void> {
   // 反馈通道（配置了才启动）：@机器人 指令 → 统一动作入口 → 回复进群
   if (cfg.feedback.dingtalkStream?.clientId) {
     const { DingTalkStreamChannel } = await import('./dingtalk-stream.js');
-    feedbackChannel = new DingTalkStreamChannel(cfg.feedback.dingtalkStream);
+    feedbackChannel = new DingTalkStreamChannel(cfg.feedback.dingtalkStream, undefined, languages.resolve);
     const { applyTaskAction } = await import('./actions.js');
     await feedbackChannel.start(action => applyTaskAction(store, scheduler, action, 'dingtalk'));
   } else {
@@ -105,6 +111,7 @@ async function main(): Promise<void> {
     feedbackChannel?.stop?.();
     await app.close();
     await scheduler.drain();
+    await events.drain();
     store.close();
     process.exit(0);
   }

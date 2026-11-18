@@ -1,12 +1,25 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ApiError, client, setApiToken, STATUS_META, type Project, type Task, type Run, type MergeStatus, type ProjectFolder } from './api';
-import { stripAgentctlLines } from '@agentdesk/core';
+import { ApiError, client, setApiToken, taskStatusMeta, type Project, type Task, type ProjectFolder } from './api';
+import { agentLabel, readRunSummary, runStage, runTiming, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 import { ProjectFolderPicker } from './ProjectFolderPicker';
+import { RunLogViewer } from './RunLogViewer';
+import { DingTalkSettings } from './DingTalkSettings';
+import { AgentFields } from './AgentFields';
+import { AgentSettings } from './AgentSettings';
+import { Onboarding, hasSeenOnboarding } from './Onboarding';
+import { Diagnostics } from './Diagnostics';
 
 type Scope = number | 'all';
+const boardColumns = [
+  { state: 'queued', tone: 'warn' },
+  { state: 'running', tone: 'active' },
+  { state: 'awaiting_confirmation', tone: 'warn' },
+  { state: 'ended', tone: 'settled' },
+  { state: 'cancelled', tone: 'settled' },
+] satisfies Array<{ state: TaskState; tone: string }>;
 
-/** 项目主导视图：顶部项目选择条 → 六栏队列（草稿/进行中/阻塞/成功/失败/取消），全部跟随所选项目 */
+/** 项目主导视图：顶部项目选择条和任务看板 */
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -20,6 +33,11 @@ export default function App() {
   const [unauthorized, setUnauthorized] = useState(false);
   const [token, setToken] = useState('');
   const [showSetup, setShowSetup] = useState(false);
+  const [showDingTalk, setShowDingTalk] = useState(false);
+  const [showAgents, setShowAgents] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+  const [guideDismissed, setGuideDismissed] = useState(false);
   const openTask = (id: number | null) => {
     const url = new URL(location.href);
     if (id) url.searchParams.set('task', String(id));
@@ -36,6 +54,7 @@ export default function App() {
       setDrafts(dr.drafts);
       setError('');
       setUnauthorized(false);
+      setLoaded(true);
     } catch (e: any) {
       setUnauthorized(e instanceof ApiError && e.status === 401);
       setError(e?.message ?? '无法连接 daemon');
@@ -55,25 +74,25 @@ export default function App() {
     }
   }, [projects, selected]);
 
+  useEffect(() => {
+    if (loaded && !error && !selectedTask && !guideDismissed && !hasSeenOnboarding()) setShowGuide(true);
+  }, [loaded, error, selectedTask, guideDismissed]);
+  const currentProject = projects.find(project => project.id === selected);
+
   const scope = (list: Task[]) =>
     selected === 'all' ? list : list.filter(t => t.project_id === selected);
 
   const scopedDrafts = selected === 'all' ? drafts : drafts.filter(d => d.project_id === selected);
   const scoped = scope(tasks);
-  const active = scoped.filter(t => ['running', 'queued', 'starting'].includes(t.status));
-  const blocked = scoped.filter(t => t.status === 'blocked');
-  const done = scoped.filter(t => t.status === 'done').slice(0, 12);
-  const failed = scoped.filter(t => t.status === 'failed').slice(0, 12);
-  const cancelled = scoped.filter(t => t.status === 'cancelled').slice(0, 12);
 
   const projectName = useMemo(
     () => new Map(projects.map(p => [p.id, p.name])),
     [projects],
   );
 
-  const act = async (id: number, type: string, feedback?: string) => {
+  const act = async (id: number, type: string, feedback?: string, runId?: number) => {
     try {
-      await client.action(id, type, feedback);
+      await client.action(id, type, feedback, runId);
       await refresh();
     } catch (e: any) { alert(e?.message ?? '操作失败'); }
   };
@@ -92,7 +111,7 @@ export default function App() {
   /** 从部分完成的结果一键创建后续草稿（同项目，原任务 + 剩余清单） */
   const followup = async (t: Task) => {
     try {
-      const prompt = `${t.prompt}\n\n[后续任务] 上次执行部分完成，未完成部分：${t.partial_remaining}`;
+      const prompt = `${t.prompt}\n\n[后续任务] 上次执行待完成：${t.partial_remaining}`;
       await client.createTask(t.project_id, prompt, true);
       await refresh();
     } catch (e: any) { alert(e?.message ?? '创建失败'); }
@@ -106,8 +125,14 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>agentdesk</h1>
+        <h1>Runember</h1>
         <span className={error ? 'conn err' : 'conn'}>{unauthorized ? '需要连接密钥' : error ? 'daemon 离线' : 'daemon 已连接'}</span>
+        <nav className="environment-tools" aria-label="环境与设置">
+          <button data-guide="environment" onClick={() => setShowSetup(true)}>诊断中心</button>
+          <button data-guide="executors" onClick={() => setShowAgents(true)}>环境设置</button>
+          <button data-guide="dingtalk" onClick={() => setShowDingTalk(true)}>钉钉设置</button>
+          <button onClick={() => setShowGuide(true)}>使用引导</button>
+        </nav>
       </header>
 
       <ProjectStrip
@@ -118,11 +143,14 @@ export default function App() {
         onChanged={() => void refresh()}
       />
 
-      <div className="toolbar">
-        <NewTask projects={projects} defaultProjectId={selected} onCreated={() => void refresh()} />
-        <button onClick={() => setShowSetup(true)}>环境检查</button>
+      <div className="toolbar project-task-tools" data-guide="new-task">
+        <NewTask key={selected} project={currentProject} onCreated={() => void refresh()} />
+        {currentProject ? <span className="task-project-context">{currentProject.name} · Agent：{agentLabel(currentProject.agent_id)} · {currentProject.model || '默认模型'}</span>
+          : <span className="task-project-context">先选择一个项目，再新建任务</span>}
       </div>
       {showSetup && <SetupPanel onClose={() => setShowSetup(false)} />}
+      {showDingTalk && <DingTalkSettings onClose={() => setShowDingTalk(false)} />}
+      {showAgents && <AgentSettings onClose={() => setShowAgents(false)} />}
       {unauthorized ? (
         <form className="banner row" onSubmit={event => {
           event.preventDefault();
@@ -135,8 +163,8 @@ export default function App() {
       ) : error && <div className="banner">{error}</div>}
       {!error && !projects.length && <p className="dim">首次使用可先检查环境，登录宿主 Codex，再添加一个本机 Git 项目。</p>}
 
-      <div className="columns six">
-        <Column title={`📝 草稿 (${scopedDrafts.length})`} tone="draft"
+      <div className="columns six" data-guide="board">
+        <Column title={`${TASK_STATE_LABELS.draft} (${scopedDrafts.length})`} tone="draft"
           empty={scopedDrafts.length ? null : '没有草稿'}>
           {scopedDrafts.map((t, i) => (
             <DraftCard key={t.id} task={t} index={i} total={scopedDrafts.length}
@@ -152,53 +180,22 @@ export default function App() {
               onDelete={draftDelete} />
           ))}
         </Column>
-        <Column title={`🔄 进行中 (${active.length})`} tone="active"
-          empty={active.length ? null : '队列为空'}>
-          {active.map(t => (
-            <Card key={t.id} task={t} project={projectName.get(t.project_id)}
+        {boardColumns.map(({ state, tone }) => {
+          const items = scoped.filter(t => t.state === state);
+          return <Column key={state} title={`${TASK_STATE_LABELS[state]} (${items.length})`} tone={tone}
+            empty={items.length ? null : '暂无'}>
+            {items.map(t => <Card key={t.id} task={t} project={projectName.get(t.project_id)}
               onOpen={() => openTask(t.id)}
-              actions={t.status === 'queued' ? <button onClick={() => void act(t.id, 'cancel')}>取消</button> : undefined} />
-          ))}
-        </Column>
-        <Column title={`⚠️ 阻塞 (${blocked.length})`} tone="warn"
-          empty={blocked.length ? null : '没有阻塞任务'}>
-          {blocked.map(t => (
-            <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => openTask(t.id)}
-              actions={<button onClick={() => openTask(t.id)}>处理阻塞</button>} />
-          ))}
-        </Column>
-        <Column title={`✅ 成功 (${done.length})`} tone="settled"
-          empty={done.length ? null : '暂无'}>
-          {done.map(t => (
-            <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => openTask(t.id)}
-              partial={!!t.partial_remaining}
-              partialRemaining={t.partial_remaining ?? undefined}
-              onFollowup={followup}
-              onContinue={t.partial_remaining ? () => void act(t.id, 'resume', '请继续完成剩余部分') : undefined} />
-          ))}
-        </Column>
-        <Column title={`❌ 失败 (${failed.length})`} tone="failed"
-          empty={failed.length ? null : '没有失败任务'}>
-          {failed.map(t => (
-            <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => openTask(t.id)}
-              actions={<button onClick={() => void act(t.id, 'retry')}>重试</button>} />
-          ))}
-        </Column>
-        <Column title={`🚫 取消 (${cancelled.length})`} tone="settled"
-          empty={cancelled.length ? null : '暂无'}>
-          {cancelled.map(t => (
-            <Card key={t.id} task={t} project={projectName.get(t.project_id)}
-              onOpen={() => openTask(t.id)} />
-          ))}
-        </Column>
+              actions={t.partial_remaining && (state === 'ended' || state === 'awaiting_confirmation')
+                ? <button onClick={() => void followup(t)}>创建后续草稿</button> : undefined} />)}
+          </Column>;
+        })}
       </div>
 
       {selectedTask && !unauthorized && (
         <TaskPanel key={selectedTask} taskId={selectedTask} onClose={() => openTask(null)} onAct={act} />
       )}
+      {showGuide && <Onboarding onClose={() => { setShowGuide(false); setGuideDismissed(true); }} />}
     </div>
   );
 }
@@ -214,6 +211,7 @@ function ProjectStrip(props: {
   const [showAdd, setShowAdd] = useState(false);
   const [report, setReport] = useState<{ name: string; rows: Array<{ name: string; ok: boolean; detail: string }> } | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
+  const [editingAgent, setEditingAgent] = useState<Project | null>(null);
 
   const patch = async (id: number, body: Record<string, unknown>) => {
     setBusy(id);
@@ -238,8 +236,8 @@ function ProjectStrip(props: {
   };
 
   const countFor = (id: number) => {
-    const n = props.tasks.filter(t => t.project_id === id && ['running', 'queued', 'starting', 'blocked', 'draft'].includes(t.status)).length;
-    return n > 0 ? `${n} 进行中` : '';
+    const n = props.tasks.filter(t => t.project_id === id && t.state !== 'ended' && t.state !== 'cancelled').length;
+    return n > 0 ? `${n} 待处理` : '';
   };
 
   return (
@@ -267,11 +265,13 @@ function ProjectStrip(props: {
                 {cnt && <span className="mini-count">{cnt}</span>}
               </div>
               <div className="proj-card-name">{p.name}</div>
+              <div className="agent-info">{agentLabel(p.agent_id)} · {p.model || '默认模型'}</div>
               <div className="proj-card-path">{p.workspace_path}</div>
               <div className="proj-card-actions" onClick={e => e.stopPropagation()}>
+                <button title="修改 Agent 与模型" onClick={() => setEditingAgent(p)}>Agent 设置</button>
                 <button title="重新检测配置" disabled={busy === p.id} onClick={() => void recheck(p)}>🔍</button>
-                <button title={isCap ? '切到隔离优先（将做平台检测）' : '切到能力优先'}
-                  disabled={busy === p.id}
+                <button title={p.agent_id !== 'codex' ? '此 Agent 当前支持能力优先模式' : isCap ? '切到隔离优先（将做平台检测）' : '切到能力优先'}
+                  disabled={busy === p.id || p.agent_id !== 'codex'}
                   onClick={() => void patch(p.id, { execution: isCap ? 'isolation' : 'capability' })}>
                   {isCap ? '🛡' : '⚡'}
                 </button>
@@ -281,6 +281,8 @@ function ProjectStrip(props: {
           );
         })}
       </div>
+      {editingAgent && <ProjectAgentSettings project={editingAgent} onClose={() => setEditingAgent(null)}
+        onSaved={() => { setEditingAgent(null); props.onChanged(); }} />}
       {report && (
         <div className="recheck-report">
           <b>🩺 「{report.name}」检测报告</b>
@@ -300,6 +302,8 @@ function AddProject(props: { onCreated: () => void }) {
   const [folder, setFolder] = useState<ProjectFolder>();
   const [showFolders, setShowFolders] = useState(false);
   const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
+  const [agent, setAgent] = useState('codex');
+  const [model, setModel] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
@@ -308,7 +312,7 @@ function AddProject(props: { onCreated: () => void }) {
     setBusy(true);
     setMsg('');
     try {
-      await client.createProject(name.trim(), folder.path, 'codex', execution);
+      await client.createProject(name.trim(), folder.path, agent, execution, model.trim() || null);
       props.onCreated();
     } catch (e: any) { setMsg(e?.message ?? '注册失败'); }
     setBusy(false);
@@ -333,15 +337,18 @@ function AddProject(props: { onCreated: () => void }) {
         {folder && <p className="folder-path">{folder.path}</p>}
         <button disabled={busy} onClick={() => setShowFolders(true)}>{folder ? '更换文件夹' : '选择文件夹'}</button>
       </Labeled>
+      <AgentFields agent={agent} model={model} disabled={busy} onAgent={value => {
+        setAgent(value); if (value !== 'codex') setExecution('capability');
+      }} onModel={setModel} />
       <Labeled label="执行模式">
         <div className="mode-select">
           <label>
             <input type="radio" checked={execution === 'capability'} onChange={() => setExecution('capability')} />
-            ⚡ 能力优先（默认）— codex 直接跑宿主，原生依赖可用
+            ⚡ 能力优先（默认）— Agent 直接跑宿主，原生依赖可用
           </label>
           <label>
-            <input type="radio" checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
-            🛡 隔离优先 — Linux 容器执行（注册时检测 Windows 原生组件，不兼容会拒绝）
+            <input type="radio" disabled={agent !== 'codex'} checked={execution === 'isolation'} onChange={() => setExecution('isolation')} />
+            🛡 隔离优先 — Linux 容器执行（目前支持 Codex）
           </label>
         </div>
       </Labeled>
@@ -362,36 +369,43 @@ function Column(props: { title: string; tone: string; empty: string | null; chil
   );
 }
 
+function ProjectAgentSettings({ project, onClose, onSaved }: { project: Project; onClose: () => void; onSaved: () => void }) {
+  const [agent, setAgent] = useState(project.agent_id);
+  const [model, setModel] = useState(project.model ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const save = async () => {
+    setBusy(true); setError('');
+    try {
+      await client.updateProject(project.id, { agent_id: agent, model: model.trim() || null,
+        ...(agent !== 'codex' ? { execution: 'capability' } : {}) });
+      onSaved();
+    } catch (e) { setError((e as Error).message); setBusy(false); }
+  };
+  return <Modal title={`${project.name} · Agent 设置`} onClose={onClose}>
+    <AgentFields agent={agent} model={model} onAgent={setAgent} onModel={setModel} disabled={busy} />
+    <p className="dim">保存后新建的任务使用此配置。已有任务和草稿保留创建时的 Agent 与模型，续跑仍恢复原会话。</p>
+    {error && <p className="form-err" role="alert">{error}</p>}
+    <FormActions primary={busy ? '保存中…' : '保存'} onPrimary={() => void save()} disabled={busy} secondary="取消" onSecondary={onClose} />
+  </Modal>;
+}
+
 function Card(props: {
   task: Task; project?: string; onOpen: () => void; actions?: React.ReactNode;
-  partial?: boolean; partialRemaining?: string;
-  onFollowup?: (t: Task) => Promise<void>; onContinue?: () => void;
 }) {
-  const meta = STATUS_META[props.task.status];
+  const meta = taskStatusMeta(props.task);
   return (
     <div className="card" onClick={props.onOpen}>
       <div className="card-head">
         <span className="badge" style={{ color: meta.color, background: meta.bg }}>{meta.label}</span>
-        {props.partial && <span className="badge partial">⚠️ 部分</span>}
         <span className="pid">#{props.task.id} · {props.project}</span>
       </div>
+      <div className="agent-info">{agentLabel(props.task.agent_id)} · {props.task.model || '默认模型'}</div>
       <div className="prompt">{props.task.prompt}</div>
-      {props.partial && props.partialRemaining && (
-        <div className="partial-note">📋 未完成：{props.partialRemaining.slice(0, 60)}</div>
-      )}
-      {(props.actions || (props.partial && (props.onFollowup || props.onContinue))) && (
+      {props.task.confirmation && <p className="confirmation-preview">{props.task.confirmation}</p>}
+      {props.actions && (
         <div className="card-actions" onClick={e => e.stopPropagation()}>
           {props.actions}
-          {props.partial && props.onContinue && (
-            <button className="primary" title="同会话继续完成剩余部分" onClick={() => props.onContinue?.()}>
-              ▶ 续跑
-            </button>
-          )}
-          {props.partial && props.onFollowup && (
-            <button title="以原任务+未完成清单创建后续草稿" onClick={() => void props.onFollowup!(props.task)}>
-              📎 后续任务
-            </button>
-          )}
         </div>
       )}
     </div>
@@ -413,8 +427,10 @@ function DraftCard(props: {
   return (
     <div className="card draft">
       <div className="card-head">
+        <button onClick={props.onOpen}>查看详情</button>
         <span className="pid">#{t.id} · {props.project}</span>
       </div>
+      <div className="agent-info">{agentLabel(t.agent_id)} · {t.model || '默认模型'}</div>
       {editing ? (
         <>
           <textarea className="draft-edit" value={text} onChange={e => setText(e.target.value)} rows={3} />
@@ -442,7 +458,7 @@ function DraftCard(props: {
 function SetupPanel({ onClose }: { onClose: () => void }) {
   const [report, setReport] = useState<Awaited<ReturnType<typeof client.setup>>['report']>([]);
   const [message, setMessage] = useState('');
-  const [checking, setChecking] = useState(true);
+  const [checking, setChecking] = useState(false);
   const check = async () => {
     setChecking(true);
     setMessage('');
@@ -450,10 +466,11 @@ function SetupPanel({ onClose }: { onClose: () => void }) {
     catch (error) { setMessage((error as Error).message); }
     finally { setChecking(false); }
   };
-  useEffect(() => { void check(); }, []);
-  return <Modal title="宿主环境检查" onClose={onClose} layout="setup">
+  return <Modal title="诊断中心" onClose={onClose} layout="setup">
+    <Diagnostics />
+    <details className="legacy-checks" onToggle={event => { if (event.currentTarget.open && !report.length && !checking) void check(); }}><summary>基础环境检查明细</summary>
     <div className="setup-check">
-      <p>能力优先会以当前 Windows 用户身份在本机项目中运行。</p>
+      <p>能力优先会以当前系统用户身份在本机项目中运行。</p>
       {report.length > 0 && <ul className="setup-report">
         {report.map(row => (
           <li key={row.name}>
@@ -475,16 +492,16 @@ function SetupPanel({ onClose }: { onClose: () => void }) {
         <button className="primary" disabled={checking} onClick={() => void check()}>{checking ? '检查中…' : '重新检查'}</button>
       </div>
     </div>
+    </details>
   </Modal>;
 }
 
-function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: number, type: string, fb?: string) => Promise<void> }) {
-  const [task, setTask] = useState<Task>();
-  const [merge, setMerge] = useState<MergeStatus>();
-  const [runs, setRuns] = useState<Run[]>([]);
+function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: number, type: string, fb?: string, runId?: number) => Promise<void> }) {
+  const [data, setData] = useState<Awaited<ReturnType<typeof client.task>>>();
   const [feedback, setFeedback] = useState('');
-  const [log, setLog] = useState<string[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<number>();
   const [error, setError] = useState('');
+  const [diagnosing, setDiagnosing] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -492,15 +509,8 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
       try {
         const d = await client.task(props.taskId);
         if (!alive) return;
-        setTask(d.task);
-        setMerge(d.merge);
-        setRuns(d.runs);
+        setData(d);
         setError('');
-        const last = d.runs.at(-1);
-        if (last) {
-          const r = await client.run(last.id);
-          if (alive) setLog(r.logTail);
-        } else setLog([]);
       } catch (e) { if (alive) setError((e as Error).message); }
     };
     void load();
@@ -508,82 +518,102 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
     return () => { alive = false; clearInterval(timer); };
   }, [props.taskId]);
 
-  const lastRun = runs.at(-1);
-  const summary = lastRun?.summary_json ? JSON.parse(lastRun.summary_json) : null;
+  const task = data?.task;
+  const merge = data?.merge;
+  const runs = data?.runs ?? [];
+  const actions = data?.actions;
+  const details = data?.details;
+  const logRun = runs.find(run => run.id === selectedRunId) ?? runs.at(-1);
+  const files = readRunSummary(runs.at(-1))?.filesChanged;
 
   return (
-    <Modal title={`#${props.taskId}${task ? ` · ${STATUS_META[task.status].label}` : ''}`} onClose={props.onClose} layout="detail">
+    <Modal title={`#${props.taskId}${task ? ` · ${taskStatusMeta(task).label}` : ''}`} onClose={props.onClose} layout="detail">
       {error && <p role="alert">{error}</p>}
       {!task && !error && <p>正在读取任务…</p>}
-      {task && <p className="prompt-full">{task.prompt}</p>}
+      {task?.confirmation && <dl className="confirmation"><dt>请确认</dt><dd>{task.confirmation}</dd></dl>}
+      {details ? <p className="run-facts">{runTiming(details)}</p> : data?.agentId && <p className="run-facts">Agent · {data.agentId}</p>}
+      {details?.cancellationRequestedAt && <dl className="run-details">
+        <dt>请求取消</dt><dd>{new Date(details.cancellationRequestedAt).toLocaleString()}</dd>
+        {details.stoppedAt && <><dt>执行器停止</dt><dd>{new Date(details.stoppedAt).toLocaleString()}</dd></>}
+        {details.stopIssue && <><dt>停止进度</dt><dd role="status">{details.stopIssue}</dd></>}
+        {!!details.filesChanged?.length && <><dt>工作区变更</dt><dd>{details.filesChanged.join('\n')}</dd></>}
+      </dl>}
+      {details?.diagnostic && <dl className="run-details"><dt>运行说明</dt><dd>{details.diagnostic}</dd></dl>}
+      {task && <div className="task-diagnostics"><button onClick={() => setDiagnosing(!diagnosing)}>{diagnosing ? '收起运行诊断' : '诊断此轮运行'}</button>
+        {diagnosing && <Diagnostics task={task.id} run={selectedRunId ?? details?.id} />}</div>}
       {merge?.repo && merge.pr && (
         <p><a href={`https://github.com/${merge.repo}/pull/${merge.pr}`} target="_blank" rel="noreferrer">查看 PR #{merge.pr}</a></p>
       )}
       {merge?.verified && <p className="dim">已验证提交 <code>{merge.verified.head}</code></p>}
 
-      {summary?.agentMessage && (
+      {details?.summary && (
         <div className="summary">
-          <b>agent 总结</b>
-          <p>{stripAgentctlLines(summary.agentMessage)}</p>
-          {summary.filesChanged?.length > 0 && (
-            <p className="dim">📝 改动 {summary.filesChanged.length} 个文件：{summary.filesChanged.slice(0, 6).join('、')}</p>
-          )}
+          <b>Agent 最终答复</b>
+          <p>{details.summary}</p>
+          {!!files?.length && <p className="dim">📝 改动 {files.length} 个文件</p>}
         </div>
       )}
-
-      {task?.status === 'blocked' && (
+      {details && (details.blocker || details.remaining || details.artifacts.length > 0) && (
+        <dl className="run-details">
+          {details.blocker && <><dt>卡点</dt><dd>{details.blocker}</dd></>}
+          {details.remaining && <><dt>待完成</dt><dd>{details.remaining}</dd></>}
+          {details.artifacts.length > 0 && <><dt>产物链接</dt>
+            {details.artifacts.map(a => <dd key={a.location}>{a.href
+              ? <a href={a.href} target="_blank" rel="noreferrer">{a.label}</a>
+              : <>{a.label} · {a.location}</>}</dd>)}</>}
+        </dl>
+      )}
+      {task && actions && (actions.resume || actions.retry || actions.cancel) && (
         <div className="feedback-box">
-          {!merge && <textarea
-            placeholder="输入你的决定（如：可以合并，今晚不部署）…"
+          {actions.resume && <textarea
+            placeholder={task.confirmation ? '填写确认或补充信息' : '续跑说明（可选）'}
             value={feedback} onChange={e => setFeedback(e.target.value)}
           />}
           <div className="row">
-            {merge ? <button className="primary" onClick={() => void props.onAct(task.id, 'retry')}>核对并继续合并</button>
-              : <button className="primary" onClick={() => { void props.onAct(task.id, 'resume', feedback || '请继续'); setFeedback(''); }}>
-                带决定续跑
-              </button>}
-            <button onClick={() => void props.onAct(task.id, 'cancel')}>取消任务</button>
+            {actions.resume && <button className="primary" onClick={() => { void props.onAct(task.id, 'resume', feedback); setFeedback(''); }}>
+              {actions.resume === 'session' ? '续跑原会话' : '以新会话继续'}
+            </button>}
+            {actions.retry && <button onClick={() => void props.onAct(task.id, 'retry')}>
+              {merge ? '核对并继续合并' : '重试（新会话）'}
+            </button>}
+            {actions.cancel && <button disabled={task.stopping}
+              onClick={() => void props.onAct(task.id, 'cancel', undefined, task.state === 'running' ? details?.id : undefined)}>
+              {task.stopping ? '正在停止' : '取消任务'}
+            </button>}
           </div>
         </div>
       )}
+      {task && <p className="prompt-full">{task.prompt}</p>}
 
-      <div className="runs">
+      {runs.length > 0 && <div className="runs">
         <b>Run 历史</b>
         {runs.map(r => (
           <div key={r.id} className="run-row">
-            run#{r.id} · {r.kind} · [{r.status}]{r.blocked_kind ? ` · ${r.blocked_kind}` : ''}
+            Run #{r.id} · {agentLabel(r.agent_id ?? task?.agent_id)}{r.model ? ` / ${r.model}` : ''} · {r.kind === 'resume' ? '续跑' : '执行'} · {runStage(r)}
             {r.session_id && <span className="dim"> · session {r.session_id.slice(0, 8)}</span>}
+            {r.log_path && <button aria-pressed={logRun?.id === r.id} onClick={() => setSelectedRunId(r.id)}>查看日志</button>}
             {r.checkpoint_sha && <p className="dim">Git checkpoint <code>{r.checkpoint_sha}</code></p>}
           </div>
         ))}
-      </div>
+      </div>}
 
-      {log.length > 0 && (
-        <pre className="log">{log.slice(-40).join('\n')}</pre>
-      )}
+      {logRun?.log_path && <RunLogViewer key={logRun.id} run={logRun} />}
     </Modal>
   );
 }
 
-function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreated: () => void }) {
+function NewTask(props: { project?: Project; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
-  const [project, setProject] = useState('');
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // 弹窗打开时同步默认项目（跟随当前选中）；打开后允许用户自由切换，不再回写
-  useEffect(() => {
-    if (!open) return;
-    if (typeof props.defaultProjectId === 'number') setProject(String(props.defaultProjectId));
-    else if (props.projects.length && !props.projects.some(p => String(p.id) === project)) setProject(String(props.projects[0]!.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间初始化
-  }, [open]);
+  const project = props.project;
 
   const submit = async (draft: boolean) => {
     if (!project || !prompt.trim() || busy) return;
     setBusy(true);
     try {
-      await client.createTask(Number(project), prompt.trim(), draft);
+      await client.createTask(project.id, prompt, draft);
       setPrompt('');
       setOpen(false);
       props.onCreated();
@@ -592,15 +622,11 @@ function NewTask(props: { projects: Project[]; defaultProjectId: Scope; onCreate
   };
 
   if (!open) {
-    return <button className="primary" disabled={!props.projects.length} onClick={() => setOpen(true)}>＋ 新建任务</button>;
+    return <button className="primary" disabled={!project} onClick={() => setOpen(true)}>＋ 新建任务</button>;
   }
   return (
     <Modal title="📝 新建任务" onClose={() => setOpen(false)}>
-      <Labeled label="项目">
-        <select value={project} onChange={e => setProject(e.target.value)}>
-          {props.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      </Labeled>
+      <div className="new-task-context"><strong>{project?.name}</strong><span>Agent · {agentLabel(project?.agent_id)} · {project?.model || '默认模型'}</span></div>
       <Labeled label="任务描述">
         <textarea
           placeholder="描述要执行的任务"

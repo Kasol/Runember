@@ -5,9 +5,10 @@
  * 消息模板与所有钉钉渠道共享：dingtalk-markdown.ts。
  */
 import { createHmac } from 'node:crypto';
-import type { NotifyEvent } from '@agentdesk/core';
+import type { NotifyEvent, UiLanguage } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
-import { buildEventMarkdown } from './dingtalk-markdown.js';
+import { buildEventMarkdown, detailFooter } from './dingtalk-markdown.js';
+import type { ReportLink } from './dingtalk-reports.js';
 
 export class DingTalkNotifier extends DedupedNotifier {
   readonly name = 'dingtalk';
@@ -15,6 +16,8 @@ export class DingTalkNotifier extends DedupedNotifier {
   constructor(
     private ch: { access_token: string; secret?: string; events?: string[]; atAll?: boolean },
     private publicUrl: string,
+    private reportLink?: ReportLink,
+    private language: () => UiLanguage = () => 'zh-CN',
   ) {
     super(30 * 60 * 1000);
   }
@@ -24,7 +27,7 @@ export class DingTalkNotifier extends DedupedNotifier {
     await this.post(title, markdown);
   }
 
-  private async post(title: string, markdown: string): Promise<void> {
+  private async post(title: string, markdown: string, detailUrl?: string, language = this.language()): Promise<void> {
     let url = `https://oapi.dingtalk.com/robot/send?access_token=${this.ch.access_token}`;
     if (this.ch.secret) {
       const ts = Date.now();
@@ -37,8 +40,7 @@ export class DingTalkNotifier extends DedupedNotifier {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        msgtype: 'markdown',
-        markdown: { title, text: markdown },
+        msgtype: 'markdown', markdown: { title, text: detailFooter(markdown, detailUrl, language) },
         at: { isAtAll: !!this.ch.atAll },
       }),
     });
@@ -49,7 +51,14 @@ export class DingTalkNotifier extends DedupedNotifier {
   protected async send(e: NotifyEvent): Promise<void> {
     const want = this.ch.events ?? ['blocked', 'failed'];
     if (!want.includes(e.kind.replace('run.', ''))) return;
-    const md = buildEventMarkdown(e, this.publicUrl);
-    if (md) await this.post(md.title, md.text);
+    const language = this.language();
+    let reportFailed = false;
+    const reportUrl = await this.reportLink?.(e, language).catch(error => {
+      console.warn(`[dingtalk-report] task=${e.task.id} run=${e.runId} ${(error as Error).message}`);
+      reportFailed = true;
+      return undefined;
+    });
+    const md = buildEventMarkdown(e, this.publicUrl, reportUrl, language, reportFailed);
+    if (md) await this.post(md.title, md.text, md.detailUrl, language);
   }
 }

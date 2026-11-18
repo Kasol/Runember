@@ -1,11 +1,11 @@
 {
   "name": "agentdesk",
-  "version": "2.1.0",
+  "version": "2.2.0-beta.1",
   "private": true,
-  "description": "无人值守 Agent 工作台：调度 Codex 等 CLI Agent，阻塞通知到钉钉，反馈后续跑",
+  "description": "Runember: local Agent task scheduling, diagnostics and session continuity",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "workspaces": [
     "packages/*",
@@ -18,8 +18,14 @@
     "daemon": "tsx apps/daemon/src/index.ts",
     "desk": "tsx apps/cli/src/index.ts",
     "web": "npm run dev -w apps/web",
+    "desktop": "npm run build -w @agentdesk/desktop && electron apps/desktop",
+    "release:desktop": "node scripts/release-desktop.mjs",
     "release:windows": "node scripts/release-windows.mjs",
-    "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit",
+    "release:runtime": "node scripts/release-runtime.mjs",
+    "package:desktop": "node scripts/package-desktop.mjs",
+    "test": "node --import tsx --test apps/daemon/test/*.test.ts",
+    "ci:build": "node scripts/ci-build.mjs"
   },
   "dependencies": {
     "dockerode": "^4.0.0"
@@ -30,5 +36,16 @@
     "esbuild": "0.28.2",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "dockerode": {
+      "uuid": "11.1.1"
+    }
+  },
+  "license": "MIT",
+  "author": "Runember contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kasol/Runember.git"
   }
 }

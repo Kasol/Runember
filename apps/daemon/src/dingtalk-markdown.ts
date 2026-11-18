@@ -1,82 +1,79 @@
 /**
- * 钉钉消息模板（共享）：webhook 机器人与应用机器人两腿使用完全相同的文案。
- * 修改通知样式只需改这一个文件。
+ * 钉钉查询和通知共用的运行详情文案。
  */
-import type { NotifyEvent } from '@agentdesk/core';
-import { stripAgentctlLines } from '@agentdesk/core';
+import { runTiming, stripAgentctlLines, taskStateLabel, type NotifyEvent, type RunDetails, type UiLanguage } from '@agentdesk/core';
 
-const LINE = '  \n';   // 钉钉 markdown 换行
-const HR = '  \n---\n'; // 分隔线
+export function runDetailsMarkdown(details: RunDetails, showConfirmation: boolean, language: UiLanguage = 'zh-CN'): string {
+  const t = (zh: string, en: string) => language === 'en' ? en : zh;
+  return [
+    showConfirmation && details.confirmation ? `**${t('等待确认', 'Confirmation needed')}**\n\n${details.confirmation}` : '',
+    runTiming(details, language),
+    details.cancellationRequestedAt ? `**${t('请求取消', 'Cancellation requested')}** · ${details.cancellationRequestedAt}` : '',
+    details.cancellationRequestedAt && details.stoppedAt ? `**${t('执行器停止', 'Executor stopped')}** · ${details.stoppedAt}` : '',
+    details.stopIssue ? `**${t('停止进度', 'Stopping progress')}**\n\n${details.stopIssue}` : '',
+    details.diagnostic ? `**${t('运行说明', 'Run diagnostic')}**\n\n${details.diagnostic}` : '',
+    details.blocker ? `**${t('卡点', 'Blocker')}**\n\n${details.blocker}` : '',
+    details.remaining ? `**${t('待完成', 'Remaining work')}**\n\n${details.remaining}` : '',
+    details.artifacts.length ? [`**${t('产物', 'Artifacts')}**`, ...details.artifacts.map(artifact => {
+      const label = artifact.label.replace(/[\[\]\r\n]/g, ' ');
+      return artifact.href ? `- [${label}](<${artifact.href}>)` : `- ${label} · ${artifact.location}`;
+    })].join('\n') : '',
+    details.summary ? `**${t('Agent 答复', 'Agent response')}**\n\n${details.summary}` : '',
+    details.cancellationRequestedAt && details.filesChanged?.length
+      ? [`**${t('工作区变更', 'Workspace changes')}**`, ...details.filesChanged.map(file => `- \`${file}\``)].join('\n') : '',
+  ].filter(Boolean).join('\n\n');
+}
 
-export function buildEventMarkdown(
-  e: NotifyEvent,
-  publicUrl: string,
-): { title: string; text: string } | null {
-  const t = `**#${e.task.id}** ${e.project.name}`;
-  const detailLink = publicUrl
-    ? `${LINE}[🎯 打开任务详情（看板）](${publicUrl}/?task=${e.task.id})`
-    : `${LINE}> 提示：配置 server.publicUrl 后可从这里直达看板详情`;
+function excerpt(text: string | undefined, limit: number): string {
+  const plain = (text ?? '').replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, ' ')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[#*_`>|]/g, '').replace(/\s+/g, ' ').trim();
+  const chars = Array.from(plain);
+  return chars.length > limit ? chars.slice(0, limit).join('') + '…' : plain;
+}
 
-  if (e.kind === 'run.blocked') {
-    const gitPaused = e.blockedKind === 'git_in_progress';
-    return {
-      title: '⚠️ agentdesk 任务阻塞',
-      text: [
-        gitPaused ? '### ⚠️ 任务暂停 · Git 操作待继续' : '### ⚠️ 任务阻塞 · 需要你的决定',
-        LINE + `**${t}** \`${e.blockedKind}\``,
-        HR,
-        e.question ? `**❓ ${e.question}**` : '（详见任务日志）',
-        HR,
-        e.retryViaCli ? `处理后在宿主机运行 \`npm run desk -- retry ${e.task.id}\`。`
-          : `在群里 @机器人并回复 \`继续 ${e.task.id} 你的决定\`。${gitPaused ? ` 查看详情用 \`状态 ${e.task.id}\`。` : ''}`,
-        detailLink,
-      ].join(''),
-    };
+export function detailFooter(text: string, detailUrl?: string, language: UiLanguage = 'zh-CN'): string {
+  return detailUrl ? `${text}\n\n---\n\n[📄 ${language === 'en' ? 'View details' : '查看详情'}](${detailUrl})` : text;
+}
+
+export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?: string, language: UiLanguage = 'zh-CN', reportFailed = false): { title: string; text: string; detailUrl?: string } {
+  const t = (zh: string, en: string) => language === 'en' ? en : zh;
+  const task = `**#${e.task.id}** ${e.project.name} · ${e.task.agent_id ?? e.project.agent_id}${e.task.model ? ' / ' + e.task.model : ''}`;
+  const detailLink = !reportUrl && !publicUrl ? t('完整答复和日志可在 Agentdesk 任务详情查看。', 'View the full response and log in Agentdesk.') : '';
+
+  if (e.kind === 'run.started') {
+    const title = taskStateLabel({ state: 'running' }, language);
+    return { title, text: [`### ${title}`, task, `Run #${e.runId} · ${e.project.agent_id} · ${t('准备执行', 'Preparing')}`, excerpt(e.task.prompt, 180), detailLink].join('\n\n') };
   }
-  if (e.kind === 'run.failed') {
-    return {
-      title: '❌ agentdesk 任务失败',
-      text: [
-        '### ❌ 任务失败',
-        LINE + `**${t}**`,
-        HR,
-        `**原因**：${e.reason}`,
-        HR,
-        (e.retryViaCli ? `在宿主机运行 \`npm run desk -- retry ${e.task.id}\`` : `回复 \`重试 ${e.task.id}\``) +
-          (publicUrl ? ` · [看板详情](${publicUrl}/?task=${e.task.id})` : ''),
-      ].join(''),
-    };
-  }
-  if (e.kind === 'run.succeeded') {
-    const s = e.summary;
-    const partial = s.partial === true;
-    const summary = s.agentMessage && stripAgentctlLines(s.agentMessage);
-    return {
-      title: partial ? '🟡 agentdesk 任务部分完成' : '✅ agentdesk 任务完成',
-      text: [
-        partial ? '### 🟡 任务部分完成（agent 自报未做完）' : '### ✅ 任务完成',
-        t,
-        '---',
-        summary ? `**📝 agent 总结**\n\n${summary}` : '',
-        s.filesChanged.length
-          ? `**🗂 改动 ${s.filesChanged.length} 个文件**\n\n${s.filesChanged.map(f => `- \`${f}\``).join('\n')}`
-          : '🗂 无文件改动',
-        s.diffStat ? `\`\`\`\n${s.diffStat}\n\`\`\`` : '',
-        partial && s.remaining
-          ? `---\n\n**📋 未完成部分**\n\n${s.remaining}\n\n回复 \`继续 ${e.task.id}\` 可以续跑此任务。`
-          : '',
-        detailLink.trimStart(),
-      ].filter(Boolean).join('\n\n'),
-    };
-  }
-  // run.started
+  const summary = e.kind === 'run.failed' ? undefined : e.summary;
+  const details: RunDetails = e.details ?? {
+    id: e.runId, agentId: e.project.agent_id,
+    stage: e.kind === 'run.failed' ? t('执行异常', 'Execution error') : t('已停止', 'Stopped'),
+    blocker: e.kind === 'run.blocked' ? e.question : undefined,
+    summary: e.kind === 'run.failed' ? e.reason : stripAgentctlLines(summary?.agentMessage ?? ''),
+    remaining: summary?.remaining,
+    artifacts: [],
+  };
+  const waiting = !!details.confirmation;
+  const title = taskStateLabel({ state: e.kind === 'run.cancelled' ? 'cancelled' : waiting ? 'awaiting_confirmation' : 'ended' }, language);
+  const retryViaCli = 'retryViaCli' in e && e.retryViaCli;
+  const next = retryViaCli ? t(`在宿主机运行 \`desk retry ${e.task.id}\` 核对并继续。`, `Run \`desk retry ${e.task.id}\` on the host to check and continue.`)
+    : e.actions?.resume || e.actions?.retry
+      ? `${e.actions?.resume === 'session' ? t('续跑原会话', 'Resume the session') : t('以新会话继续', 'Continue in a new session')} \`${t('继续', 'continue')} ${e.task.id} [${t('说明', 'feedback')}]\`` : '';
   return {
-    title: '▶️ agentdesk 任务开始',
+    title,
+    detailUrl: reportUrl ?? (publicUrl ? `${publicUrl}/?task=${e.task.id}` : undefined),
     text: [
-      '### ▶️ 任务开始',
-      LINE + `**${t}**`,
-      `\n\n${e.task.prompt}\n`,
+      `### ${title}`,
+      task,
+      waiting && details.confirmation ? `**${t('等待确认', 'Confirmation needed')}**\n\n${excerpt(details.confirmation, 360)}` : '',
+      runTiming(details, language),
+      details.stopIssue || details.diagnostic ? `${t('运行说明', 'Run diagnostic')} · ${excerpt(details.stopIssue || details.diagnostic, 140)}` : '',
+      details.blocker ? `${t('卡点', 'Blocker')} · ${excerpt(details.blocker, 140)}` : '',
+      details.remaining ? `${t('待完成', 'Remaining work')} · ${excerpt(details.remaining, 140)}` : '',
+      details.summary ? `**${t('Agent 答复', 'Agent response')}**\n\n${excerpt(details.summary, 220)}` : '',
+      reportFailed ? t('⚠️ 详情报告暂未生成，请在 Agentdesk 查看完整内容。', '⚠️ Detail report unavailable; view full details in Agentdesk.') : '',
+      next,
       detailLink,
-    ].join(''),
+    ].filter(Boolean).join('\n\n'),
   };
 }

@@ -12,7 +12,7 @@
  * 事件解析/状态机/通知全部复用（同 AgentAdapter 接口）。
  */
 import { execFile, spawn as nodeSpawn, ChildProcess } from 'node:child_process';
-import { Writable } from 'node:stream';
+import type { Readable } from 'node:stream';
 import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
 import { delimiter, join, resolve as resolvePath } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -86,7 +86,7 @@ export async function loginHostCodex(path: string, proxy: AppConfig['proxy'], de
 }
 
 export interface NativeProc {
-  exitCode: number;
+  exitCode: number | null;
   killed: boolean;
   out: string[];
   err: string[];
@@ -123,40 +123,51 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
     });
     onProc?.(child);
 
-    const sink = (target: string[], onLine?: (l: string) => void): Writable => {
+    const collect = (source: Readable | null, target: string[], onLine?: (l: string) => void): (() => void) => {
       let buf = '';
       const decoder = new StringDecoder('utf8');
-      const w = new Writable({
-        write(chunk, _enc, cb) {
-          buf += decoder.write(chunk);
-          let nl: number;
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl).replace(/\r+$/, '');
-            buf = buf.slice(nl + 1);
-            if (line.trim()) { target.push(line); onLine?.(line); }
-          }
-          cb();
-        },
-        final(cb) {
-          buf += decoder.end();
-          if (buf.trim()) { target.push(buf); onLine?.(buf); }
-          cb();
-        },
+      const emit = (line: string) => {
+        if (!line.trim()) return;
+        target.push(line);
+        onLine?.(line);
+      };
+      source?.on('data', (chunk: Buffer) => {
+        buf += decoder.write(chunk);
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          emit(buf.slice(0, nl).replace(/\r+$/, ''));
+          buf = buf.slice(nl + 1);
+        }
       });
-      return w;
+      return () => {
+        source?.destroy();
+        emit(buf + decoder.end());
+      };
     };
-    child.stdout?.pipe(sink(out, onStdoutLine));
-    child.stderr?.pipe(sink(err));
+    const flushStdout = collect(child.stdout, out, onStdoutLine);
+    const flushStderr = collect(child.stderr, err);
 
-    const timer = setTimeout(() => { killed = true; killProcessTree(child); }, timeoutMs);
-    child.on('close', code => {
+    let settled = false;
+    let drainTimer: NodeJS.Timeout | undefined;
+    const timer = timeoutMs > 0 ? setTimeout(() => { killed = true; killProcessTree(child); }, timeoutMs) : undefined;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve({ exitCode: code ?? -1, killed, out, err });
+      clearTimeout(drainTimer);
+      flushStdout();
+      flushStderr();
+      resolve({ exitCode: code, killed, out, err });
+    };
+    child.once('exit', code => {
+      clearTimeout(timer);
+      // A background descendant may inherit the pipes and keep 'close' from firing.
+      drainTimer = setTimeout(() => finish(code), 1_000);
     });
-    child.on('error', e => {
-      clearTimeout(timer);
+    child.once('close', finish);
+    child.once('error', e => {
       err.push(`spawn 失败: ${e.message}`);
-      resolve({ exitCode: -1, killed, out, err });
+      finish(null);
     });
   });
 }

@@ -4,9 +4,10 @@
  * 主动推送使用显式配置的会话和机器人标识。
  * 与 webhook 机器人功能等价 —— 配置了应用机器人后可删除 webhook 机器人，单机器人双职责。
  */
-import type { NotifyEvent } from '@agentdesk/core';
+import type { NotifyEvent, UiLanguage } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
-import { buildEventMarkdown } from './dingtalk-markdown.js';
+import { buildEventMarkdown, detailFooter } from './dingtalk-markdown.js';
+import type { ReportLink } from './dingtalk-reports.js';
 
 export class DingTalkAppNotifier extends DedupedNotifier {
   readonly name = 'dingtalk-app';
@@ -18,6 +19,8 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     private publicUrl: string,
     private events: string[] = ['blocked', 'failed', 'succeeded'],
     private destination: { conversationId?: string; robotCode?: string } = {},
+    private reportLink?: ReportLink,
+    private language: () => UiLanguage = () => 'zh-CN',
   ) {
     super(30 * 60 * 1000);
   }
@@ -39,7 +42,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     return d.accessToken;
   }
 
-  private async post(title: string, markdown: string): Promise<void> {
+  private async post(title: string, markdown: string, detailUrl?: string, language = this.language()): Promise<void> {
     const { conversationId, robotCode } = this.destination;
     if (!conversationId) throw new Error('钉钉主动通知缺少 conversationId');
     const token = await this.getToken();
@@ -48,7 +51,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
       headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
       body: JSON.stringify({
         msgKey: 'sampleMarkdown',
-        msgParam: JSON.stringify({ title, text: markdown }),
+        msgParam: JSON.stringify({ title, text: detailFooter(markdown, detailUrl, language) }),
         openConversationId: conversationId,
         robotCode: robotCode || this.clientId,
       }),
@@ -59,9 +62,16 @@ export class DingTalkAppNotifier extends DedupedNotifier {
 
   protected async send(e: NotifyEvent): Promise<void> {
     if (!this.events.includes(e.kind.replace('run.', ''))) return;
-    const md = buildEventMarkdown(e, this.publicUrl);
+    const language = this.language();
+    let reportFailed = false;
+    const reportUrl = await this.reportLink?.(e, language).catch(error => {
+      console.warn(`[dingtalk-report] task=${e.task.id} run=${e.runId} ${(error as Error).message}`);
+      reportFailed = true;
+      return undefined;
+    });
+    const md = buildEventMarkdown(e, this.publicUrl, reportUrl, language, reportFailed);
     if (md) {
-      await this.post(md.title, md.text);
+      await this.post(md.title, md.text, md.detailUrl, language);
       console.log(`[notify:dingtalk-app] 钉钉已接受通知 task=${e.task.id} run=${e.runId} event=${e.kind}`);
     }
   }

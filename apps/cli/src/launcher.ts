@@ -74,7 +74,7 @@ export async function startDaemon(cfg: AppConfig, browser: boolean): Promise<voi
     if (!ready) throw new Error(`启动失败，请查看 ${path}`);
     console.log(`日志目录 ${cfg.logDir}`);
   }
-  console.log(`agentdesk 运行于 ${url}`);
+  console.log(`Runember 运行于 ${url}`);
   console.log(`数据目录 ${dir}`);
   if (browser) openBrowser(url);
 }

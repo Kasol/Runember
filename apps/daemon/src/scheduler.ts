@@ -15,7 +15,7 @@ export class Scheduler {
   private ticking = false;
   private stopped = false;
   private jobs = new Map<number, { workspace: string; done: Promise<void> }>();
-  private recovering = new Map<number, Run>();
+  private recovering = new Set<number>();
 
   constructor(
     private cfg: AppConfig,
@@ -24,7 +24,7 @@ export class Scheduler {
   ) {}
 
   start(): void {
-    for (const run of this.store.activeRuns()) this.recovering.set(run.id, run);
+    for (const run of this.store.activeRuns()) this.recovering.add(run.id);
     this.stopped = false;
     this.tick();
     this.timer = setInterval(() => void this.tick(), this.cfg.scheduler.tickMs);
@@ -38,6 +38,7 @@ export class Scheduler {
 
   async drain(): Promise<void> {
     await Promise.allSettled([...this.jobs.values()].map(job => job.done));
+    await this.recoveringTick;
   }
 
   /** API 创建/resume 任务后立即触发一次调度（不等下个 tick） */
@@ -45,15 +46,32 @@ export class Scheduler {
     void this.tick();
   }
 
+  stopRun(run: Run): void {
+    if (this.jobs.has(run.task_id)) void this.runner.requestStop(run);
+    else this.tickNow();
+  }
+
+  private recoveringTick?: Promise<void>;
+  private async reconcile(): Promise<void> {
+    for (const id of this.recovering.keys()) {
+      try {
+        const current = this.store.getRun(id);
+        if (!current || await this.runner.recoverRun(current)) this.recovering.delete(id);
+      } catch (error) {
+        console.error(`Run #${id} 暂无法核对执行器状态:`, error);
+      }
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
-      for (const [id, run] of this.recovering) {
-        if (await this.runner.workerIsAlive(run.worker)) continue;
-        this.store.interruptRun(run);
-        this.recovering.delete(id);
+      for (const run of this.store.activeRuns()) {
+        if (run.cancellation && this.jobs.has(run.task_id)) void this.runner.requestStop(run);
       }
+      this.recoveringTick = this.reconcile();
+      await this.recoveringTick;
       if (this.stopped) return;
       const queued = this.store.dispatchableTasks(Date.now());
       if (!queued.length) return;
@@ -87,7 +105,7 @@ export class Scheduler {
         const done = this.runner.execute(task.id).catch(error => {
           console.error(`任务 #${task.id} 异常:`, error);
           for (const run of this.store.activeRuns().filter(run => run.task_id === task.id)) {
-            this.recovering.set(run.id, run);
+            this.recovering.add(run.id);
           }
         }).finally(() => {
           this.jobs.delete(task.id);

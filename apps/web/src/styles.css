@@ -5,6 +5,23 @@ body { font-family: "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif;
 
 header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
 header h1 { font-size: 22px; }
+.environment-tools { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.app > header { align-items: center; flex-wrap: wrap; padding-bottom: 16px; border-bottom: 1px solid #e1e6ec; }
+.task-project-context { font-size: 13px; color: #57606a; overflow-wrap: anywhere; }
+.new-task-context { display: grid; gap: 8px; background: #f6f8fa; border-radius: 8px; padding: 14px; margin-bottom: 20px; }
+.new-task-context span { color: #57606a; font-size: 13px; overflow-wrap: anywhere; }
+.tour-overlay { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: 0; background: transparent; color: #1f2328; overflow: hidden; }
+.tour-overlay::backdrop { background: transparent; }
+.tour-shade { position: fixed; inset: 0; pointer-events: none; }
+.tour-bubble { position: fixed; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow-y: auto; border-radius: 14px; background: #fff; padding: 20px; box-shadow: 0 12px 50px #0004; }
+.tour-step { display: flex; align-items: center; justify-content: space-between; color: #6b7583; font-size: 12px; margin-bottom: 10px; }
+.tour-step button { border: 0; padding: 2px 6px; }
+.tour-bubble h2 { font-size: 17px; margin-bottom: 10px; }
+.tour-bubble p { font-size: 13px; line-height: 1.85; color: #57606a; }
+.tour-actions { display: flex; gap: 8px; align-items: center; margin-top: 20px; }
+.tour-actions span { flex: 1; }
+.tour-actions button { padding: 7px 10px; white-space: nowrap; }
+@media (max-width: 600px) { .environment-tools { width: 100%; margin-left: 0; } }
 .conn { font-size: 12px; color: #1a7f37; }
 .conn.err { color: #c01d2e; }
 
@@ -52,6 +69,28 @@ button.danger:hover { background: #fde8ea; }
 .panel-form textarea { resize: vertical; }
 .labeled { margin-bottom: 14px; }
 .labeled label { display: block; font-size: 12.5px; color: #57606a; margin-bottom: 5px; }
+.agent-fields { display: grid; gap: 18px; margin-bottom: 20px; }
+.agent-fields .labeled { margin: 0; }
+.field-help { font-size: 12px; color: #6b7583; line-height: 1.65; margin-top: 7px; }
+.agent-runtime-note { display: grid; gap: 5px; padding: 10px 12px; background: #f6f8fa; border-radius: 8px; font-size: 12px; color: #57606a; min-width: 0; }
+.agent-runtime-note code { color: #34445a; overflow-wrap: anywhere; white-space: pre-wrap; }
+.agent-fields + .dim { font-size: 12.5px; line-height: 1.8; margin-bottom: 20px; }
+.agent-settings-intro { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; line-height: 1.7; font-size: 13px; color: #57606a; }
+.agent-settings-intro p { flex: 1; }
+.agent-settings-intro button { flex: none; }
+.agent-settings-list { display: grid; gap: 18px; }
+.settings-section-title { font-size: 15px; margin: 24px 0 12px; }
+.log-restart-note { font-size: 12.5px; line-height: 1.7; color: #8a6d00; background: #fff8df; padding: 10px 12px; border-radius: 6px; overflow-wrap: anywhere; }
+.agent-path-card { display: grid; gap: 12px; padding: 18px; border: 1px solid #e1e6ec; border-radius: 12px; background: #fff; }
+.agent-path-heading { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.agent-path-heading h4 { font-size: 15px; }
+.agent-availability { font-size: 12px; color: #9a6700; }
+.agent-availability.available { color: #1a7f37; }
+.agent-path-card > label { font-size: 12.5px; color: #57606a; margin-bottom: -6px; }
+.agent-path-card > input, .agent-path-card > select { width: 100%; min-width: 0; border: 1px solid #d0d7de; border-radius: 6px; padding: 9px 10px; font: inherit; font-size: 13px; }
+.agent-path-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.agent-path-actions span { color: #1a7f37; font-size: 12px; }
+@media (max-width: 600px) { .agent-settings-intro { align-items: flex-start; flex-direction: column; gap: 10px; } .agent-path-card { padding: 14px; } }
 
 .draft-box { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .draft-box h2 { font-size: 14px; color: #456; margin-bottom: 10px; }
@@ -98,8 +137,11 @@ button.danger:hover { background: #fde8ea; }
 .pid { font-size: 12px; color: #8a93a0; }
 .prompt { font-size: 13px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .card-actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
-.badge.partial { color: #ad5f00; background: #ffeccd; }
-.partial-note { margin-top: 6px; font-size: 12px; color: #ad5f00; background: #fff7ec; border-radius: 6px; padding: 4px 8px; }
+.confirmation, .run-details { margin: 0; padding: 12px 14px; border-radius: 8px; background: #fff7ec; }
+.confirmation dt, .run-details dt { font-weight: 600; }
+.confirmation dd, .run-details dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-details dd + dt { margin-top: 10px; }
+.confirmation-preview { white-space: pre-wrap; overflow-wrap: anywhere; color: #ad5f00; margin: 4px 0; }
 
 button { padding: 6px 14px; border-radius: 6px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; font: inherit; font-size: 13px; }
 button:hover { border-color: #1677ff; color: #1677ff; }
@@ -129,6 +171,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .prompt-full { font-size: 14px; line-height: 1.6; margin-bottom: 14px; color: #345; white-space: pre-wrap; }
 
 .setup-check { display: grid; gap: 14px; font-size: 13.5px; line-height: 1.6; }
+.diagnostics { display: grid; gap: 12px; margin: 12px 0; }
+.diagnostic-finding { border: 1px solid #dce4ed; border-left: 4px solid #1677ff; border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.8; }
+.diagnostic-finding.error { border-left-color: #c01d2e; background: #fffafa; }
+.diagnostic-finding.warning { border-left-color: #b77900; background: #fffcf2; }
+.diagnostic-finding ul { padding-left: 20px; margin-top: 8px; }
+.diagnostic-evidence { margin-top: 8px; color: #57606a; font-size: 12px; }
+.diagnostic-evidence pre, .diagnostic-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: #f6f8fa; border-radius: 6px; max-height: 320px; overflow-y: auto; }
+.diagnostic-preview { display: grid; gap: 12px; font-size: 13px; }
+.legacy-checks { margin-top: 20px; }
+.legacy-checks > summary { cursor: pointer; margin-bottom: 12px; }
+.task-diagnostics { margin: 12px 0; }
 .setup-report { list-style: none; border: 1px solid #e3e8ee; border-radius: 8px; }
 .setup-report li {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px;
@@ -156,8 +209,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 .summary { background: #f0f7ff; border-left: 3px solid #1677ff; padding: 10px 14px; border-radius: 0 8px 8px 0; margin-bottom: 14px; font-size: 13.5px; }
 .summary b { color: #1677ff; }
-.summary p { margin-top: 4px; line-height: 1.6; white-space: pre-wrap; }
+.summary p { margin-top: 4px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dim { color: #8a93a0; font-size: 12.5px; }
+.agent-info { color: #57606a; font-size: 12px; line-height: 1.5; margin: 5px 0; overflow-wrap: anywhere; }
 
 .feedback-box { margin-bottom: 14px; }
 .feedback-box textarea { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #d0d7de; font: inherit; margin-bottom: 8px; resize: vertical; }
@@ -166,4 +220,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .runs b { display: block; margin-bottom: 6px; }
 .run-row { padding: 4px 0; border-bottom: 1px dashed #eef0f2; }
 
-.log { background: #1b2430; color: #a9e34b; border-radius: 8px; padding: 12px; font-family: Consolas, monospace; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; }
+.run-row button { margin-left: 8px; }
+.run-log { margin-top: 12px; }
+.log { margin-top: 8px; max-height: 44vh; overflow: auto; overflow-wrap: anywhere; background: #1b2430; color: #a9e34b; border-radius: 8px; padding: 12px; font-family: Consolas, monospace; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; }

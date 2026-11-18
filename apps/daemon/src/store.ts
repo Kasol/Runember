@@ -5,7 +5,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Task, TaskStatus, Run, Project } from '@agentdesk/core';
+import { taskView, type Task, type TaskStatus, type TaskView, type Run, type Project, type RunActivity } from '@agentdesk/core';
 import type { MergePlan, MergeState } from './merge.js';
 
 export class Store {
@@ -61,6 +61,9 @@ export class Store {
         session_id TEXT,
         checkpoint_sha TEXT,
         worker_json TEXT,
+        cancellation_json TEXT,
+        execution_json TEXT,
+        recent_activity_json TEXT,
         status TEXT NOT NULL DEFAULT 'queued',
         exit_code INTEGER,
         blocked_kind TEXT,
@@ -75,24 +78,39 @@ export class Store {
         state TEXT NOT NULL DEFAULT '{}',
         next_run_at INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS settings(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     const runCols = this.db.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>;
-    for (const field of ['checkpoint_sha', 'worker_json']) {
+    for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json']) {
       if (!runCols.some(col => col.name === field)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${field} TEXT`);
+    }
+    for (const [table, fields] of [['projects', ['model']], ['tasks', ['agent_id', 'model', 'execution']], ['runs', ['agent_id', 'model']]] as const) {
+      const names = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      for (const field of fields) if (!names.some(column => column.name === field)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${field} TEXT`);
     }
   }
 
   // ── projects ──
+  getSetting(key: string): string | undefined {
+    return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as { value: string } | undefined)?.value;
+  }
+  setSetting(key: string, value: string): void {
+    this.db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run(key, value);
+  }
   addProject(
     name: string, workspacePath: string, agentId: string,
-    execution: string = 'capability', extraPackages?: string[], mcpServers?: string[],
+    execution: string = 'capability', extraPackages?: string[], mcpServers?: string[], model?: string | null,
   ): Project {
     const r = this.db.prepare(
-      'INSERT INTO projects(name, workspace_path, agent_id, execution, extra_packages, mcp_servers, created_at) VALUES (?,?,?,?,?,?,?)',
+      'INSERT INTO projects(name, workspace_path, agent_id, execution, extra_packages, mcp_servers, created_at, model) VALUES (?,?,?,?,?,?,?,?)',
     ).run(name, workspacePath, agentId, execution,
       extraPackages?.length ? JSON.stringify(extraPackages) : null,
       mcpServers?.length ? JSON.stringify(mcpServers) : null,
-      new Date().toISOString());
+      new Date().toISOString(), model || null);
     return this.getProject(Number(r.lastInsertRowid))!;
   }
   getProject(id: number): Project | undefined {
@@ -104,7 +122,9 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM projects WHERE name=?').get(name) as any;
     return row ? this.parseProject(row) : undefined;
   }
-  updateProject(id: number, patch: { execution?: string; extraPackages?: string[]; mcpServers?: string[] }): Project {
+  updateProject(id: number, patch: { agent_id?: string; model?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }): Project {
+    if (patch.agent_id) this.db.prepare('UPDATE projects SET agent_id=? WHERE id=?').run(patch.agent_id, id);
+    if (patch.model !== undefined) this.db.prepare('UPDATE projects SET model=? WHERE id=?').run(patch.model || null, id);
     if (patch.execution) this.db.prepare('UPDATE projects SET execution=? WHERE id=?').run(patch.execution, id);
     if (patch.extraPackages !== undefined) {
       this.db.prepare('UPDATE projects SET extra_packages=? WHERE id=?')
@@ -140,6 +160,7 @@ export class Store {
   // ── tasks ──
   /** draft=true 时任务以 draft 状态落库（不参与调度），draft_order 用于草稿排序 */
   addTask(projectId: number, prompt: string, opts?: { draft?: boolean }): Task {
+    const project = this.getProject(projectId)!;
     const status = opts?.draft ? 'draft' : 'queued';
     let draftOrder: number | null = null;
     if (opts?.draft) {
@@ -149,8 +170,8 @@ export class Store {
       draftOrder = (row?.m ?? 0) + 1;
     }
     const r = this.db.prepare(
-      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at) VALUES (?,?,?,?,?)',
-    ).run(projectId, prompt, status, draftOrder, new Date().toISOString());
+      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution) VALUES (?,?,?,?,?,?,?,?)',
+    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability');
     return this.getTask(Number(r.lastInsertRowid))!;
   }
   addMergeTask(projectId: number, plan: MergePlan): Task {
@@ -188,12 +209,20 @@ export class Store {
       WHERE t.status='queued' AND COALESCE(m.next_run_at, 0)<=? ORDER BY t.id`).all(now) as unknown as Task[];
   }
   getTask(id: number): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as Task | undefined;
+    const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as Task | undefined;
+    return task && this.taskBinding(task);
+  }
+  private taskBinding(task: Task): Task {
+    return { ...task, agent_id: task.agent_id ?? 'codex', execution: task.execution ?? this.getProject(task.project_id)?.execution ?? 'capability' };
   }
   listTasks(status?: TaskStatus): Task[] {
     return (status
       ? this.db.prepare('SELECT * FROM tasks WHERE status=? ORDER BY id').all(status)
       : this.db.prepare('SELECT * FROM tasks ORDER BY id DESC LIMIT 200').all()) as unknown as Task[];
+  }
+  listTaskViews(status?: TaskStatus): TaskView[] {
+    return this.listTasks(status).map(row => { const task = this.taskBinding(row); return taskView(task,
+      task.status === 'blocked' || task.status === 'running' ? this.latestRun(task.id) : undefined); });
   }
   setTaskStatus(id: number, status: TaskStatus): void {
     this.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(status, id);
@@ -215,9 +244,9 @@ export class Store {
     list.forEach((tid, i) => upd.run(i + 1, tid));
   }
   listDrafts(): Task[] {
-    return this.db.prepare(
+    return (this.db.prepare(
       "SELECT * FROM tasks WHERE status='draft' ORDER BY draft_order, id",
-    ).all() as unknown as Task[];
+    ).all() as unknown as Task[]).map(task => this.taskBinding(task));
   }
   setPendingFeedback(id: number, feedback: string | null): void {
     this.db.prepare('UPDATE tasks SET pending_feedback=? WHERE id=?').run(feedback, id);
@@ -225,8 +254,9 @@ export class Store {
 
   // ── runs ──
   insertRun(taskId: number, kind: 'normal' | 'resume'): Run {
-    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status) VALUES (?,?,?)')
-      .run(taskId, kind, 'starting');
+    const task = this.getTask(taskId)!;
+    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status, agent_id, model) VALUES (?,?,?,?,?)')
+      .run(taskId, kind, 'starting', task.agent_id ?? 'codex', task.model ?? null);
     return this.getRun(Number(r.lastInsertRowid))!;
   }
   beginRun(taskId: number): Run | undefined {
@@ -258,24 +288,61 @@ export class Store {
         WHERE id=? AND status='running'`).run(status, partial, run.task_id);
     });
   }
+  requestCancellation(taskId: number, expectedRunId?: number): Run | undefined {
+    return this.transaction(() => {
+      if (this.getTask(taskId)?.status !== 'running') return;
+      const run = this.latestRun(taskId);
+      if (!run || (expectedRunId !== undefined && run.id !== expectedRunId)
+        || (run.status !== 'starting' && run.status !== 'running')) return;
+      if (run.cancellation) return run;
+      if (run.execution) return;
+      run.cancellation = { requestedAt: new Date().toISOString() };
+      this.updateRun(run.id, { cancellation: run.cancellation });
+      return run;
+    });
+  }
   interruptRun(run: Run): void {
     const isMerge = !!this.getMerge(run.task_id);
     this.finishRun(run.id, {
       status: 'blocked', blocked_kind: 'interrupted', ended_at: new Date().toISOString(),
       summary_json: JSON.stringify({
-        agentMessage: isMerge ? 'daemon 中断，合并任务将从已保存进度继续。'
+        diagnostic: isMerge ? 'daemon 中断，合并任务将从已保存进度继续。'
           : 'daemon 中断，执行器已退出，结果未知。请查看工作区和日志后决定是否继续。',
         filesChanged: [], diffStat: '',
       }),
     }, isMerge ? 'queued' : 'blocked');
   }
-  private parseRun(row: (Run & { worker_json?: string }) | undefined): Run | undefined {
+  private parseRun(row: (Run & {
+    worker_json?: string; cancellation_json?: string; execution_json?: string; recent_activity_json?: string;
+  }) | undefined): Run | undefined {
     if (!row) return undefined;
-    const { worker_json, ...run } = row;
-    return { ...run, worker: worker_json ? JSON.parse(worker_json) as Run['worker'] : undefined };
+    const { worker_json, cancellation_json, execution_json, recent_activity_json, ...run } = row;
+    return {
+      ...run,
+      worker: worker_json ? JSON.parse(worker_json) as Run['worker'] : undefined,
+      cancellation: cancellation_json ? JSON.parse(cancellation_json) as Run['cancellation'] : undefined,
+      execution: execution_json ? JSON.parse(execution_json) as Run['execution'] : undefined,
+    };
   }
   getRun(id: number): Run | undefined {
     return this.parseRun(this.db.prepare('SELECT * FROM runs WHERE id=?').get(id) as Run | undefined);
+  }
+  latestRun(taskId: number): Run | undefined {
+    return this.parseRun(this.db.prepare('SELECT * FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1').get(taskId) as Run | undefined);
+  }
+  recentRunActivities(runId: number): RunActivity[] {
+    const row = this.db.prepare('SELECT recent_activity_json FROM runs WHERE id=?').get(runId) as
+      { recent_activity_json: string | null } | undefined;
+    return row?.recent_activity_json ? JSON.parse(row.recent_activity_json) as RunActivity[] : [];
+  }
+  recordRunActivity(runId: number, activity: RunActivity): void {
+    const recent = this.recentRunActivities(runId);
+    const previous = recent.find(item => item.key === activity.key && item.kind === activity.kind);
+    if (!activity.detail && previous?.detail) activity = { ...activity, detail: previous.detail };
+    if (previous && ((previous.phase === activity.phase && previous.detail === activity.detail)
+      || (previous.phase !== 'started' && activity.phase === 'started'))) return;
+    const next = [...recent.filter(item => item !== previous), activity].slice(-10);
+    this.db.prepare('UPDATE runs SET recent_activity_json=? WHERE id=?').run(JSON.stringify(next), runId);
   }
   runsOfTask(taskId: number): Run[] {
     return (this.db.prepare('SELECT * FROM runs WHERE task_id=? ORDER BY id').all(taskId) as unknown as Run[])
@@ -287,17 +354,19 @@ export class Store {
   }
   /** 任务最近一次携带 session 的 run —— resume 的钥匙 */
   lastSessionOfTask(taskId: number): string | undefined {
+    const agent = this.getTask(taskId)?.agent_id ?? 'codex';
     const row = this.db.prepare(
-      'SELECT session_id FROM runs WHERE task_id=? AND session_id IS NOT NULL ORDER BY id DESC LIMIT 1',
-    ).get(taskId) as { session_id: string } | undefined;
+      "SELECT session_id FROM runs WHERE task_id=? AND session_id IS NOT NULL AND COALESCE(agent_id,'codex')=? ORDER BY id DESC LIMIT 1",
+    ).get(taskId, agent) as { session_id: string } | undefined;
     return row?.session_id;
   }
   updateRun(id: number, patch: Partial<Run>): void {
     const cur = this.getRun(id)!;
     const next = { ...cur, ...patch };
     this.db.prepare(
-      'UPDATE runs SET status=?, session_id=?, checkpoint_sha=?, worker_json=?, exit_code=?, blocked_kind=?, log_path=?, summary_json=?, started_at=?, ended_at=? WHERE id=?',
+      'UPDATE runs SET status=?, session_id=?, checkpoint_sha=?, worker_json=?, cancellation_json=?, execution_json=?, exit_code=?, blocked_kind=?, log_path=?, summary_json=?, started_at=?, ended_at=? WHERE id=?',
     ).run(next.status, next.session_id ?? null, next.checkpoint_sha ?? null, next.worker ? JSON.stringify(next.worker) : null,
+      next.cancellation ? JSON.stringify(next.cancellation) : null, next.execution ? JSON.stringify(next.execution) : null,
       next.exit_code ?? null, next.blocked_kind ?? null,
       next.log_path ?? null, next.summary_json ?? null, next.started_at ?? null, next.ended_at ?? null, id);
   }

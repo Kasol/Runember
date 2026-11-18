@@ -1,0 +1,26 @@
+name: 故障反馈
+description: 提供版本、复现步骤和诊断信息
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Runember 版本
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: 系统、CPU 架构与 Agent
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤、预期和实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnosis
+    attributes:
+      label: 任务 / Run 编号及诊断错误代码
+      description: 先预览并脱敏报告。不要提交令牌、个人配置或完整项目代码。
