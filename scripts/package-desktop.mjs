@@ -20,6 +20,7 @@ execFileSync(process.execPath, [process.env.npm_execpath, 'run', 'build', '-w', 
 const require = createRequire(join(desktop, 'package.json'));
 const { build, Platform, Arch } = require('electron-builder');
 const electronBinary = require('electron');
+execFileSync(process.execPath, [join(root, 'scripts/smoke-desktop.mjs'), runtime], { cwd:root, stdio:'inherit' });
 const electronDist = process.platform === 'darwin' ? resolve(electronBinary, '../../../..') : resolve(electronBinary, '..');
 const arch = process.arch === 'arm64' ? Arch.arm64 : Arch.x64;
 const target = process.argv.includes('--dir') ? ['dir'] : windows ? ['nsis', 'zip'] : ['dmg', 'zip'];

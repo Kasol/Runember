@@ -22,7 +22,7 @@ npm run package:desktop -- dist/运行时目录名 dist/installers
 
 在目标系统和 CPU 架构上构建。运行时包含 Node.js、Web、CLI、daemon、生产依赖及许可证；桌面包额外包含 Electron。输出目录必须不存在，避免静默覆盖候选包。
 
-`npm run ci:build` 串行完成以上步骤。`.github/workflows/build.yml` 在 Windows x64、Mac ARM 和 Mac Intel 上执行测试、运行时回归及客户端打包，保存安装包和 SHA-256 附件。模拟执行器回归包含正常执行、原会话续跑、日志目录重启切换和离线故障诊断。
+`npm run ci:build` 串行完成以上步骤。`.github/workflows/build.yml` 在 Windows x64、Mac ARM 和 Mac Intel 上执行测试、运行时回归及客户端打包，保存安装包和 SHA-256 附件。模拟执行器回归包含正常执行、原会话续跑、日志目录重启切换和离线故障诊断。打包前还会在独立用户目录启动真实 Electron，检查首次引导、诊断中心、离线诊断菜单，以及终止测试 UI 后 daemon 仍然可访问。
 
 ## 发布检查
 
