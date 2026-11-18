@@ -61,9 +61,9 @@ Mac 解压后，在运行时目录执行：
 
 ## 让 Agent 自动安装
 
-使用 [Agent 安装说明](INSTALL_FOR_AGENTS.md)。仓库提供 `scripts/install.ps1` 和 `scripts/install.sh`，下载带版本号的运行时并校验 SHA-256。脚本不要求预装 Node.js，不修改系统 PATH，不覆盖用户配置。
+使用 [Agent 安装说明](INSTALL_FOR_AGENTS.md)。Agent 会先请你选择「桌面客户端」或「CLI + Web」；你已经指定时直接按指定方式安装。
 
-脚本安装的是 Web + CLI 运行时。需要桌面窗口和托盘时，另行选择桌面安装包。
+选择桌面客户端时，下载对应系统和架构的桌面安装包；选择 CLI + Web 时，使用 `scripts/install.ps1` 或 `scripts/install.sh` 下载运行时并校验 SHA-256。脚本不要求预装 Node.js，不修改系统 PATH，不覆盖用户配置。
 
 ## 升级与卸载
 

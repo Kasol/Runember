@@ -11,7 +11,7 @@ Runember 管理任务与执行器的生命周期。任务内部如何完成，�
 - **直接安装**：[下载发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)，按 [安装与首次配置](docs/install.md) 操作。
 - **让自己的 Agent 安装**：把本页地址交给它，并附上：
 
-  > 请按此仓库 docs/INSTALL_FOR_AGENTS.md 安装 Runember。先检查环境、保留已有配置，安装后运行诊断；需要登录或授权时明确告诉我。
+  > 请按此仓库 docs/INSTALL_FOR_AGENTS.md 安装 Runember。先让我选择「桌面客户端」或「CLI + Web」；如果我已经指定，就按指定方式安装。检查环境、保留已有配置，安装后运行诊断；需要登录或授权时明确告诉我。
 
 - **遇到问题**：打开顶部「诊断中心」，或查看 [故障排查](docs/troubleshooting.md)。
 
