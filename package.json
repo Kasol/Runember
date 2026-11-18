@@ -1,6 +1,6 @@
 {
   "name": "agentdesk",
-  "version": "2.2.0-beta.1",
+  "version": "2.2.0-beta.2",
   "private": true,
   "description": "Runember: local Agent task scheduling, diagnostics and session continuity",
   "type": "module",

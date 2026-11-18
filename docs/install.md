@@ -1,6 +1,6 @@
 # 安装 Runember
 
-当前为 `v2.2.0-beta.1` 团队内测版。下载入口：[GitHub Release](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.1)。
+当前为 `v2.2.0-beta.2` 团队内测版。下载入口：[GitHub Release](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)。
 
 ## 选择安装方式
 

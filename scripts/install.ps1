@@ -1,5 +1,5 @@
 ﻿param(
-  [string]$Version = 'v2.2.0-beta.1',
+  [string]$Version = 'v2.2.0-beta.2',
   [string]$InstallDir,
   [switch]$Start,
   [switch]$Json
@@ -29,7 +29,7 @@ if (Test-Path -LiteralPath $InstallDir) {
     Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
     Invoke-WebRequest -Uri ($url + '.sha256') -OutFile ($archive + '.sha256') -UseBasicParsing
     $expected = ((Get-Content -LiteralPath ($archive + '.sha256') -Raw).Trim() -split '\s+')[0]
-    if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) { throw '安装包校验失败，未执行安装。' }
+    if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) { throw 'SHA256_CHECK_FAILED: 安装包校验失败，未执行安装。' }
     $extract = Join-Path $work 'extract'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
@@ -56,11 +56,39 @@ if (Test-Path -LiteralPath $InstallDir) {
   }
 }
 if (!(Test-Path -LiteralPath $entry)) { throw '安装目录缺少启动命令。' }
-$reportText = & $entry doctor --json
-$diagnosticCode = $LASTEXITCODE
-$report = ($reportText -join "`n") | ConvertFrom-Json
-if ($Start) { & $entry start --no-browser | ForEach-Object { [Console]::Error.WriteLine($_) }; if ($LASTEXITCODE -ne 0) { throw '安装已完成，但后台服务启动失败，请运行 doctor --json。' } }
-$result = [ordered]@{ status = $(if ($diagnosticCode -eq 0) { 'installed' } else { 'needs_setup' }); version = $Version; installDir = $InstallDir; command = $entry; diagnostics = $report }
+$previousConsoleEncoding = [Console]::OutputEncoding
+$previousAppDir = $env:AGENTDESK_APP_DIR
+function Invoke-InstalledCli([string]$Arguments) {
+  $outputFile = Join-Path ([IO.Path]::GetTempPath()) ('runember-cli-' + [guid]::NewGuid().ToString('N'))
+  $errorFile = $outputFile + '.stderr'
+  try {
+    $cli = Start-Process -FilePath (Join-Path $InstallDir 'node.exe') -ArgumentList ('"' + (Join-Path $InstallDir 'desk.mjs') + '" ' + $Arguments) -WorkingDirectory $InstallDir -WindowStyle Hidden -RedirectStandardOutput $outputFile -RedirectStandardError $errorFile -PassThru
+    if (!$cli.WaitForExit(60000)) { $cli.Kill(); throw 'CLI_TIMEOUT: 命令执行超时。' }
+    $text = [IO.File]::ReadAllText($outputFile, [Text.Encoding]::UTF8)
+    $errors = [IO.File]::ReadAllText($errorFile, [Text.Encoding]::UTF8)
+    if ($errors) { [Console]::Error.WriteLine($errors) }
+    return [pscustomobject]@{ Text = $text; Code = $cli.ExitCode }
+  } finally {
+    Remove-Item -LiteralPath $outputFile, $errorFile -Force -ErrorAction SilentlyContinue
+  }
+}
+try {
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$env:AGENTDESK_APP_DIR = $InstallDir
+$diagnosis = Invoke-InstalledCli 'doctor --json'
+$diagnosticCode = $diagnosis.Code
+$report = $diagnosis.Text | ConvertFrom-Json
+if ($Start) {
+  # A separate hidden console keeps a detached daemon from inheriting the caller's output pipes.
+  $started = Start-Process -FilePath (Join-Path $InstallDir 'node.exe') -ArgumentList ('"' + (Join-Path $InstallDir 'desk.mjs') + '" start --no-browser') -WorkingDirectory $InstallDir -WindowStyle Hidden -Verb Open -PassThru
+  if (!$started.WaitForExit(60000)) { $started.Kill(); throw 'CLI_TIMEOUT: 后台启动命令超时。' }
+  if ($started.ExitCode -ne 0) { throw '安装已完成，但后台服务启动失败，请运行 doctor --json。' }
+}
+$result = [ordered]@{ status = $(if ($diagnosticCode -eq 0) { 'installed' } else { 'needs_setup' }); version = $Version; installDir = $InstallDir; command = $entry; started = $Start.IsPresent; diagnostics = $report }
 if ($Json) { $result | ConvertTo-Json -Depth 14 }
 else { 'Runember 已安装：' + $InstallDir; '使用命令：' + $entry; '依赖或登录未完成时，请按诊断建议处理。' }
 if ($diagnosticCode -ne 0) { exit 2 }
+} finally {
+  [Console]::OutputEncoding = $previousConsoleEncoding
+  $env:AGENTDESK_APP_DIR = $previousAppDir
+}

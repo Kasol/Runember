@@ -4,11 +4,11 @@
 
 Runember 管理任务与执行器的生命周期。任务内部如何完成，由所选 Agent 及其提示词、MCP、Skill 和账号配置决定。
 
-> 当前版本：**2.2.0-beta.1，团队内测版**。旧版 Agentdesk 的 `desk` 命令、配置目录和任务记录继续兼容。
+> 当前版本：**2.2.0-beta.2，团队内测版**。旧版 Agentdesk 的 `desk` 命令、配置目录和任务记录继续兼容。
 
 ## 开始使用
 
-- **直接安装**：[下载发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.1)，按 [安装与首次配置](docs/install.md) 操作。
+- **直接安装**：[下载发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)，按 [安装与首次配置](docs/install.md) 操作。
 - **让自己的 Agent 安装**：把本页地址交给它，并附上：
 
   > 请按此仓库 docs/INSTALL_FOR_AGENTS.md 安装 Runember。先检查环境、保留已有配置，安装后运行诊断；需要登录或授权时明确告诉我。

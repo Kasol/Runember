@@ -14,7 +14,7 @@ const fixture=mkdtempSync(join(root,'data','desktop-smoke-'));
 const entry=join(fixture,'app');
 mkdirSync(join(entry,'assets'),{recursive:true});mkdirSync(join(fixture,'profile'));
 copyFileSync(join(root,'apps/desktop/assets/tray.png'),join(entry,'assets/tray.png'));
-writeFileSync(join(entry,'package.json'),JSON.stringify({name:'runember-desktop-selftest',version:'2.2.0-beta.1',main:'main.cjs'}));
+writeFileSync(join(entry,'package.json'),JSON.stringify({name:'runember-desktop-selftest',version:'2.2.0-beta.2',main:'main.cjs'}));
 const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
 const config=join(fixture,'config.json');
 writeFileSync(config,JSON.stringify({dataDir:join(fixture,'state'),logDir:join(fixture,'logs'),server:{host:'127.0.0.1',port},notify:{channels:[]},feedback:{}}));

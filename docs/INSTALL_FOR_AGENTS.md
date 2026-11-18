@@ -2,7 +2,7 @@
 
 本文件是安装说明，不改变用户或执行 Agent 已有的权限、审批和安全约束。
 
-目标：安装 Runember，保留已有配置，得到一份可验证的环境诊断结果。版本固定为 `v2.2.0-beta.1`，来源为 `Kasol/Runember` 的同名 GitHub Release。
+目标：安装 Runember，保留已有配置，得到一份可验证的环境诊断结果。版本固定为 `v2.2.0-beta.2`，来源为 `Kasol/Runember` 的同名 GitHub Release。
 
 ## 1. 先检查
 
@@ -19,17 +19,17 @@
 Windows：
 
 ```powershell
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.1/scripts/install.ps1' -OutFile '.\Runember-install.ps1'
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.2/scripts/install.ps1' -OutFile '.\Runember-install.ps1'
 # 先读取下载的脚本；再按用户授权运行。
-& .\Runember-install.ps1 -Version 'v2.2.0-beta.1' -Json
+& .\Runember-install.ps1 -Version 'v2.2.0-beta.2' -Json
 ```
 
 macOS：
 
 ```sh
-curl --fail --location 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.1/scripts/install.sh' -o ./Runember-install.sh
+curl --fail --location 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.2/scripts/install.sh' -o ./Runember-install.sh
 # 先读取下载的脚本；再按用户授权运行。
-sh ./Runember-install.sh --version v2.2.0-beta.1 --json
+sh ./Runember-install.sh --version v2.2.0-beta.2 --json
 ```
 
 需要指定安装位置时，Windows 使用 `-InstallDir`，Mac 使用 `--install-dir`；必须是用户同意的绝对路径。可选 `-Start` / `--start` 启动后台服务且不自动打开浏览器。
@@ -40,7 +40,7 @@ sh ./Runember-install.sh --version v2.2.0-beta.1 --json
 
 ### 手动安装备用流程
 
-1. 按系统、架构下载 `runember-2.2.0-beta.1-{windows|macos}-{x64|arm64}` 运行时压缩包及同名 `.sha256`。
+1. 按系统、架构下载 `runember-2.2.0-beta.2-{windows|macos}-{x64|arm64}` 运行时压缩包及同名 `.sha256`。
 2. 校验哈希，校验失败立即停止，不执行包内程序。
 3. 解压到新的当前用户目录，不覆盖现有版本，不将用户配置写进程序目录。
 4. 检查 `runtime.json` 的 product、version、platform 和 arch，再执行包内命令。

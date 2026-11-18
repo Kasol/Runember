@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-version=v2.2.0-beta.1
+version=v2.2.0-beta.2
 install_dir=
 start=0
 json=0
