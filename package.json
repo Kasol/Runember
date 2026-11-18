@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit",
     "release:runtime": "node scripts/release-runtime.mjs",
     "package:desktop": "node scripts/package-desktop.mjs",
+    "pretest": "node -e \"require('node:fs').mkdirSync('data',{recursive:true})\"",
     "test": "node --import tsx --test apps/daemon/test/*.test.ts",
     "ci:build": "node scripts/ci-build.mjs"
   },

@@ -57,7 +57,8 @@ else {
   if (!text.includes('Node.js is licensed')) throw new Error('Node.js 许可证无效。');
   writeFileSync(join(output, 'NODE-LICENSE.txt'), text);
 }
-cpSync(join(root, existsSync(join(root, 'docs/install.md')) ? 'docs/install.md' : 'docs/windows-quickstart.md'), join(output, 'README.md'));
+cpSync(join(root, 'README.md'), join(output, 'README.md'));
+cpSync(join(root, 'docs'), join(output, 'docs'), { recursive: true });
 writeFileSync(join(output, 'runtime.json'), JSON.stringify({ product: 'Runember', version, platform: process.platform, arch: process.arch, node: process.versions.node }, null, 2));
 if (windows) {
 writeFileSync(join(output, 'desk.cmd'), [

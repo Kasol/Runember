@@ -8,6 +8,7 @@ import net from 'node:net';
 const runtime = resolve(process.argv[2]);
 const manifest = JSON.parse(readFileSync(join(runtime, 'runtime.json'), 'utf8'));
 assert.equal(manifest.product, 'Runember'); assert.equal(manifest.platform, process.platform); assert.equal(manifest.arch, process.arch);
+mkdirSync(resolve('data'), { recursive: true });
 const fixture = mkdtempSync(resolve('data', 'runtime-smoke-'));
 const workspace = join(fixture, 'workspace space'), oldLogs = join(fixture, 'old-logs'), nextLogs = join(fixture, 'new-logs'), state = join(fixture, 'state');
 for (const directory of [workspace, oldLogs, nextLogs, state]) mkdirSync(directory, { recursive: true });
