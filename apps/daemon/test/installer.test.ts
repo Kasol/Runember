@@ -11,7 +11,7 @@ test('Windows installer verifies downloads, preserves existing directories and r
   const folder = 'runember-2.2.0-beta.1-windows-x64';
   const source = join(dir, folder); mkdirSync(source);
   writeFileSync(join(source,'runtime.json'), JSON.stringify({product:'Runember',version:'2.2.0-beta.1',platform:'win32',arch:'x64'}));
-  writeFileSync(join(source,'runember.cmd'), '@echo off\r\necho {"schemaVersion":1,"findings":[]}\r\nexit /b 0\r\n');
+  writeFileSync(join(source,'runember.cmd'), '@echo off\r\nif "%1"=="start" (echo fixture started & exit /b 0)\r\necho {"schemaVersion":1,"findings":[]}\r\nexit /b 0\r\n');
   const archive = join(dir,'runtime.zip');
   execFileSync('tar.exe',['-a','-cf',archive,'-C',dir,folder],{windowsHide:true});
   writeFileSync(archive+'.sha256',createHash('sha256').update(readFileSync(archive)).digest('hex')+'  runtime.zip\n');
@@ -24,7 +24,7 @@ function Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing)
   if($Uri.EndsWith('.sha256')) { if($Mode -eq 'bad-hash'){Set-Content -LiteralPath $OutFile -Value ('0'*64)}else{Copy-Item -LiteralPath ($FixtureArchive+'.sha256') -Destination $OutFile} }
   else {Copy-Item -LiteralPath $FixtureArchive -Destination $OutFile}
 }
-& $Installer -InstallDir $Destination -Json
+& $Installer -InstallDir $Destination -Json -Start:($Mode -eq 'start')
 exit $LASTEXITCODE
 `);
   const installer=resolve('scripts/install.ps1');
@@ -32,6 +32,7 @@ exit $LASTEXITCODE
   const run=(destination:string,mode='good')=>spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',harness,installer,archive,destination,mode],{encoding:'utf8',windowsHide:true,timeout:30000});
   const destination=join(dir,'installed with spaces');
   const first=run(destination); assert.equal(first.status,0,first.stderr); assert.equal(JSON.parse(first.stdout).status,'installed');
+  const started=run(destination,'start');assert.equal(started.status,0,started.stderr);assert.equal(JSON.parse(started.stdout).status,'installed');assert.match(started.stderr,/fixture started/);
   writeFileSync(join(destination,'keep.txt'),'original');
   const reuse=run(destination,'no-download'); assert.equal(reuse.status,0,reuse.stderr); assert.equal(readFileSync(join(destination,'keep.txt'),'utf8'),'original');
   const corrupt=join(dir,'bad-download'); const bad=run(corrupt,'bad-hash'); assert.notEqual(bad.status,0); assert.equal(existsSync(corrupt),false); assert.match(bad.stderr,/校验失败/);

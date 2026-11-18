@@ -59,7 +59,7 @@ if (!(Test-Path -LiteralPath $entry)) { throw '安装目录缺少启动命令。
 $reportText = & $entry doctor --json
 $diagnosticCode = $LASTEXITCODE
 $report = ($reportText -join "`n") | ConvertFrom-Json
-if ($Start) { & $entry start --no-browser | Out-Host; if ($LASTEXITCODE -ne 0) { throw '安装已完成，但后台服务启动失败，请运行 doctor --json。' } }
+if ($Start) { & $entry start --no-browser | ForEach-Object { [Console]::Error.WriteLine($_) }; if ($LASTEXITCODE -ne 0) { throw '安装已完成，但后台服务启动失败，请运行 doctor --json。' } }
 $result = [ordered]@{ status = $(if ($diagnosticCode -eq 0) { 'installed' } else { 'needs_setup' }); version = $Version; installDir = $InstallDir; command = $entry; diagnostics = $report }
 if ($Json) { $result | ConvertTo-Json -Depth 14 }
 else { 'Runember 已安装：' + $InstallDir; '使用命令：' + $entry; '依赖或登录未完成时，请按诊断建议处理。' }
