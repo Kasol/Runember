@@ -27,13 +27,14 @@ const fail=e=>{fs.writeFileSync(result,JSON.stringify({error:e.stack||String(e)}
 process.on('uncaughtException',fail);dialog.showErrorBox=(title,detail)=>fail(new Error(title+': '+detail));dialog.showMessageBox=async()=>({response:1});
 setTimeout(()=>fail(new Error('Desktop startup timed out')),45000).unref();
 app.on('browser-window-created',(_,win)=>{
- win.on('show',()=>win.hide());win.webContents.once('did-finish-load',async()=>{try{
-  await new Promise(r=>setTimeout(r,1000));
-  const before=await win.webContents.executeJavaScript('({title:document.title,guide:!!document.querySelector(".tour-overlay[open]")})');
+ win.webContents.setBackgroundThrottling(false);
+ if(process.platform==='win32')win.on('show',()=>win.hide());
+ win.webContents.once('did-finish-load',async()=>{try{
+  let before;for(let i=0;i<100;i++){before=await win.webContents.executeJavaScript('({title:document.title,guide:!!document.querySelector(".tour-overlay[open]"),body:document.body.innerText.slice(0,500)})');if(before.guide)break;await new Promise(r=>setTimeout(r,200));}
   await win.webContents.executeJavaScript('document.querySelector("[aria-label=关闭引导]")?.click();document.querySelector("[data-guide=environment]")?.click()');
   let diagnosis=false;for(let i=0;i<100;i++){diagnosis=await win.webContents.executeJavaScript('!!document.querySelector(".diagnostic-finding")');if(diagnosis)break;await new Promise(r=>setTimeout(r,200));}
   const help=Menu.getApplicationMenu().items.find(x=>x.label==='帮助')?.submenu.items.map(x=>x.label)||[];
-  fs.writeFileSync(result,JSON.stringify({title:before.title,firstLaunchGuide:before.guide,diagnosis,offlineDiagnosisMenu:help.some(x=>x.includes('本机诊断')),node:process.versions.node}));app.exit(0);
+  fs.writeFileSync(result,JSON.stringify({title:before.title,firstLaunchGuide:before.guide,diagnosis,offlineDiagnosisMenu:help.some(x=>x.includes('本机诊断')),node:process.versions.node,...(!before.guide?{body:before.body}:{})}));app.exit(0);
  }catch(e){fail(e)}});
 });
 import(require('node:url').pathToFileURL(${JSON.stringify(join(root,'apps/desktop/dist/main.mjs'))}).href).catch(fail);
@@ -53,7 +54,7 @@ try{
  // Terminate only this disposable UI host; the detached daemon must survive it.
  stopHost();
  await Promise.race([exit,delay(5000).then(()=>{throw Error('Test UI host did not stop')})]);
- assert.ok(!result.error,JSON.stringify(result));assert.equal(result.title,'Runember');assert.ok(result.firstLaunchGuide);assert.ok(result.diagnosis);assert.ok(result.offlineDiagnosisMenu);
+ assert.ok(!result.error,JSON.stringify(result));assert.equal(result.title,'Runember');assert.ok(result.firstLaunchGuide,JSON.stringify(result));assert.ok(result.diagnosis);assert.ok(result.offlineDiagnosisMenu);
  const health=await fetch('http://127.0.0.1:'+port+'/healthz',{signal:AbortSignal.timeout(3000)});assert.equal(health.status,200);
  console.log(JSON.stringify({desktopStartup:true,firstLaunchGuide:true,diagnostics:true,daemonSurvivesClient:true,platform:process.platform,fixture}));
 }finally{
