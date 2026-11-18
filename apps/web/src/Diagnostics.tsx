@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { sanitizeDiagnosticReport, type DiagnosticReport } from '@agentdesk/core';
 import { client } from './api';
+import { EnvironmentChecks } from './EnvironmentChecks';
 
 export function Diagnostics({ task, run }: { task?: number; run?: number }) {
   const [report, setReport] = useState<DiagnosticReport>();
@@ -26,7 +27,10 @@ export function Diagnostics({ task, run }: { task?: number; run?: number }) {
     <p className="field-help">只读取运行事实和错误证据，不执行修复，不修改任务状态。报告不包含完整提示词、代码或凭证文件。</p>
     {error && <p className="form-err" role="alert">{error}。后台服务无法连接时，可在本机运行 <code>desk doctor --json</code>。</p>}
     {report && <><p className="field-help">{report.product} · {report.platform.os} / {report.platform.arch}{report.runId ? ' · Run #' + report.runId : ''} · {new Date(report.generatedAt).toLocaleString()}</p>
-      {report.findings.map((finding, index) => <article className={`diagnostic-finding ${finding.level}`} key={`${finding.code}-${index}`}>
+      {report.scope === 'environment' ? <EnvironmentChecks rows={report.findings.map(item => ({
+        name: item.title, detail: item.detail, evidence: item.evidence, suggestions: item.suggestions,
+        ok: item.level === 'info', ...item.check,
+      }))} /> : report.findings.map((finding, index) => <article className={`diagnostic-finding ${finding.level}`} key={`${finding.code}-${index}`}>
         <strong>{finding.level === 'error' ? '❌' : finding.level === 'warning' ? '⚠️' : 'ℹ️'} {finding.title}{finding.certainty === 'possible' ? '（需进一步确认）' : ''}</strong>
         <p>{finding.detail}</p>
         {finding.evidence.map((evidence, i) => <div className="diagnostic-evidence" key={i}><span>{evidence.source}</span><pre>{evidence.text}</pre></div>)}

@@ -12,8 +12,8 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdtempSync, unlinkSync, rmdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, unlinkSync, rmdirSync, accessSync, constants, statSync } from 'node:fs';
+import { join, delimiter, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 const pExecFile = promisify(execFile);
@@ -21,10 +21,13 @@ const pExecFile = promisify(execFile);
 export interface HostGitResult { ok: boolean; stdout: string; stderr: string }
 
 /** 宿主 git 是否可用（doctor / project add 时检测） */
-export async function hostGitAvailable(): Promise<{ ok: boolean; version: string }> {
+export async function hostGitAvailable(): Promise<{ ok: boolean; version: string; path?: string }> {
   try {
-    const { stdout } = await pExecFile('git', ['--version'], { timeout: 10_000 });
-    return { ok: true, version: stdout.trim() };
+    const { stdout } = await pExecFile('git', ['--version'], { timeout: 10_000, windowsHide: true });
+    const executable = process.platform === 'win32' ? 'git.exe' : 'git';
+    const path = (process.env.PATH ?? '').split(delimiter).filter(Boolean).map(dir => resolve(dir.replace(/^"|"$/g, ''), executable))
+      .find(file => { try { accessSync(file, constants.X_OK); return statSync(file).isFile(); } catch { return false; } });
+    return { ok: true, version: stdout.trim(), path };
   } catch {
     return { ok: false, version: '' };
   }

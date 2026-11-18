@@ -33,17 +33,16 @@ export function LogDirectorySettings() {
   return <section className="agent-path-card log-directory-settings">
     <h4>日志目录</h4>
     {settings && <div className="agent-runtime-note"><span>当前生效目录</span><code>{settings.currentDir}</code></div>}
-    <label htmlFor="log-directory">保存目录</label>
+    <label htmlFor="log-directory">日志位置</label>
     <input id="log-directory" value={path} disabled={!settings || busy} placeholder="日志目录的绝对路径，例如 D:/agentdesk/logs"
       onChange={e => { setPath(e.target.value); setMessage(''); }} />
     <div className="agent-path-actions">
       <button disabled={!settings || busy} onClick={() => setChoosing(true)}>选择文件夹</button>
-      <button className="primary" disabled={!settings || busy || !path.trim()} onClick={() => void save(path)}>保存日志目录</button>
-      <button disabled={!settings || busy} onClick={() => void save('')}>跟随数据目录</button>
+      <button className="primary" disabled={!settings || busy || !path.trim()} onClick={() => void save(path)}>保存</button>
+      <button disabled={!settings || busy} onClick={() => void save('')}>自动选择</button>
     </div>
     {message && <p className="field-help" role="status">{message}</p>}
-    {settings?.restartRequired && <p className="log-restart-note">待生效：{settings.configuredDir}<br />请在托盘停止后台服务，待任务结束、服务停止后再启动。</p>}
-    <p className="field-help">用于 daemon.log、每轮 Agent 输出和详情报告。设置保存在当前任务数据目录，优先于 .env 和配置文件。重启后新日志写入新目录，历史日志保留原位置。Agent 自身的会话、缓存和内部日志仍由该 Agent 管理。</p>
+    {settings?.restartRequired && <p className="log-restart-note">待生效：{settings.configuredDir}（重启后台后生效）</p>}
     {error && <p className="form-err" role="alert">{error}</p>}
     {choosing && <ProjectFolderPicker title="选择日志文件夹" initialPath={settings?.currentDir}
       onSelect={folder => { setPath(folder.path); setMessage(''); setChoosing(false); }} onClose={() => setChoosing(false)} />}

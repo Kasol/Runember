@@ -158,7 +158,9 @@ export function agentCatalog(cfg: AppConfig): AgentInfo[] {
     if (defaultModel && !models.some(model => model.id === defaultModel)) models.unshift({ id: defaultModel, label: defaultModel });
     return { ...definition, available: !!runtime, executable: runtime?.executable, command: runtime?.command,
       configuredPath: cfg.agents[definition.id]?.executable ?? process.env[`AGENTDESK_${definition.id.toUpperCase()}_PATH`] ?? '',
-      detectedPaths: detectedAgentPaths(definition.id), models: [...new Map(models.map(model => [model.id, model])).values()], defaultModel };
+      detectedPaths: detectedAgentPaths(definition.id).filter(executable => !!findNativeAgent(definition.id,
+        { ...cfg, agents: { ...cfg.agents, [definition.id]: { ...cfg.agents[definition.id]!, executable } } })),
+      models: [...new Map(models.map(model => [model.id, model])).values()], defaultModel };
   });
 }
 

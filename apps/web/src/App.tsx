@@ -9,6 +9,7 @@ import { AgentFields } from './AgentFields';
 import { AgentSettings } from './AgentSettings';
 import { Onboarding, hasSeenOnboarding } from './Onboarding';
 import { Diagnostics } from './Diagnostics';
+import { EnvironmentChecks, type EnvironmentRow } from './EnvironmentChecks';
 
 type Scope = number | 'all';
 const boardColumns = [
@@ -209,7 +210,7 @@ function ProjectStrip(props: {
   onChanged: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
-  const [report, setReport] = useState<{ name: string; rows: Array<{ name: string; ok: boolean; detail: string }> } | null>(null);
+  const [report, setReport] = useState<{ name: string; rows: EnvironmentRow[] } | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [editingAgent, setEditingAgent] = useState<Project | null>(null);
 
@@ -286,9 +287,7 @@ function ProjectStrip(props: {
       {report && (
         <div className="recheck-report">
           <b>🩺 「{report.name}」检测报告</b>
-          {report.rows.map((r, i) => (
-            <div key={i} className={r.ok ? 'ok' : 'bad'}>{r.ok ? '✅' : '❌'} {r.name} — {r.detail}</div>
-          ))}
+          <EnvironmentChecks rows={report.rows} />
           <button onClick={() => setReport(null)}>关闭</button>
         </div>
       )}
@@ -386,7 +385,7 @@ function ProjectAgentSettings({ project, onClose, onSaved }: { project: Project;
     <AgentFields agent={agent} model={model} onAgent={setAgent} onModel={setModel} disabled={busy} />
     <p className="dim">保存后新建的任务使用此配置。已有任务和草稿保留创建时的 Agent 与模型，续跑仍恢复原会话。</p>
     {error && <p className="form-err" role="alert">{error}</p>}
-    <FormActions primary={busy ? '保存中…' : '保存'} onPrimary={() => void save()} disabled={busy} secondary="取消" onSecondary={onClose} />
+    <FormActions primary="保存" onPrimary={() => void save()} disabled={busy} secondary="取消" onSecondary={onClose} />
   </Modal>;
 }
 
@@ -456,43 +455,8 @@ function DraftCard(props: {
 }
 
 function SetupPanel({ onClose }: { onClose: () => void }) {
-  const [report, setReport] = useState<Awaited<ReturnType<typeof client.setup>>['report']>([]);
-  const [message, setMessage] = useState('');
-  const [checking, setChecking] = useState(false);
-  const check = async () => {
-    setChecking(true);
-    setMessage('');
-    try { setReport((await client.setup()).report); }
-    catch (error) { setMessage((error as Error).message); }
-    finally { setChecking(false); }
-  };
-  return <Modal title="诊断中心" onClose={onClose} layout="setup">
+  return <Modal title="诊断中心" onClose={onClose} layout="detail">
     <Diagnostics />
-    <details className="legacy-checks" onToggle={event => { if (event.currentTarget.open && !report.length && !checking) void check(); }}><summary>基础环境检查明细</summary>
-    <div className="setup-check">
-      <p>能力优先会以当前系统用户身份在本机项目中运行。</p>
-      {report.length > 0 && <ul className="setup-report">
-        {report.map(row => (
-          <li key={row.name}>
-            <span className="setup-item">
-              <span role="img" aria-label={row.ok ? '通过' : row.required ? '未通过' : '可选'}>
-                {row.ok ? '✅' : row.required ? '❌' : '⚠️'}
-              </span>
-              <strong>{row.name}</strong>
-            </span>
-            <span className="setup-detail">{row.detail}</span>
-          </li>
-        ))}
-      </ul>}
-      {report.some(row => row.name === '宿主 Codex 登录' && !row.ok) && (
-        <p>在发布包目录打开终端，运行 <code>.\desk.cmd auth</code>，浏览器授权后再检查。源码运行方式为 <code>npm run desk -- auth</code>。</p>
-      )}
-      {message && <p className="form-err" role="alert">{message}</p>}
-      <div className="row">
-        <button className="primary" disabled={checking} onClick={() => void check()}>{checking ? '检查中…' : '重新检查'}</button>
-      </div>
-    </div>
-    </details>
   </Modal>;
 }
 

@@ -13,7 +13,7 @@ import { getAdapterId } from './util.js';
 import { hostGitAvailable, setupProjectGit } from './hostgit.js';
 import { checkIsolationCompatibility } from './platform.js';
 import { extname, join, resolve } from 'node:path';
-import { runDoctor } from './doctor.js';
+import { runDoctor, groupDoctorChecks } from './doctor.js';
 import { DingTalkNotifier } from './dingtalk.js';
 import { DingTalkAppNotifier } from './dingtalk-app.js';
 import Docker from 'dockerode';
@@ -233,7 +233,7 @@ export function buildServer(deps: {
   app.post<{ Params: { id: string } }>('/api/projects/:id/recheck', async (req, reply) => {
     const p = store.getProject(Number(req.params.id));
     if (!p) return reply.code(404).send({ error: 'not found' });
-    const report = await runDoctor(runtimeConfig(cfg, store), { mode: p.execution, projectPath: p.workspace_path, agentId: p.agent_id });
+    const report = groupDoctorChecks(await runDoctor(runtimeConfig(cfg, store), { mode: p.execution, projectPath: p.workspace_path, agentId: p.agent_id }));
     if ((p.execution ?? 'capability') === 'isolation') {
       const plat = await checkIsolationCompatibility(p.workspace_path);
       report.push({ name: '平台兼容性（隔离模式）', ok: plat.ok, detail: plat.summary, required: true });

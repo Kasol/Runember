@@ -9,6 +9,46 @@ import { loadConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
 import { buildServer } from '../src/server.js';
 import type { Scheduler } from '../src/scheduler.js';
+import { groupDoctorChecks } from '../src/doctor.js';
+import { execFileSync } from 'node:child_process';
+
+test('environment checks group versions and login, while preserving failures without a separate provider row', () => {
+  const rows = groupDoctorChecks([
+    { name:'宿主 Codex CLI', tool:'codex', path:'/tools/codex', ok:true, required:true, detail:'/tools/codex' },
+    { name:'Codex 版本', tool:'codex', part:'version', ok:true, required:false, detail:'codex-cli 1.2.3' },
+    { name:'Codex 登录', tool:'codex', part:'login', ok:false, required:true, detail:'需要登录' },
+    { name:'ZCode CLI', tool:'zcode', path:'/tools/zcode.cjs', ok:true, required:false, detail:'/tools/zcode.cjs' },
+    { name:'ZCode 供应商配置', tool:'zcode', part:'configuration', ok:false, required:false, detail:'供应商配置缺失' },
+  ]);
+  assert.equal(rows.length,2);
+  assert.equal(rows[0]!.version,'codex-cli 1.2.3');assert.equal(rows[0]!.path,'/tools/codex');
+  assert.equal(rows[0]!.status,'登录未通过');assert.equal(rows[0]!.ok,false);assert.equal(rows[0]!.required,true);
+  assert.equal(rows[1]!.ok,false);assert.equal(rows[1]!.required,false);assert.match(rows[1]!.detail,/配置缺失/);
+  assert.ok(!rows.some(row=>row.name.includes('供应商')));
+  const passed=groupDoctorChecks([{ name:'ZCode CLI', tool:'zcode', ok:true, required:true, detail:'可用' },
+    { name:'ZCode 供应商配置', tool:'zcode', part:'configuration', ok:true, required:true, detail:'配置已找到' }]);
+  assert.equal(passed.length,1);assert.equal(passed[0]!.ok,true);assert.equal(passed[0]!.detail,'可用');
+});
+
+test('project recheck reports the effective Agent path and version, and returns only one workspace row', async t => {
+  const dir=mkdtempSync(resolve('data','test-project-checks-'));
+  const cfg=loadConfig({configPath:join(dir,'absent.json'),dataDir:dir,logDir:dir});cfg.server.token='fixture';
+  const first=join(dir,'first.cjs'),selected=join(dir,'selected.cjs');
+  writeFileSync(first,'');writeFileSync(selected,'');writeFileSync(join(dir,'package.json'),JSON.stringify({name:'zcode-fixture',version:'1.2.3'}));
+  for(const args of [['init','-q'],['config','user.name','Fixture'],['config','user.email','fixture@example.invalid']])execFileSync('git',args,{cwd:dir,windowsHide:true});
+  cfg.agents.zcode!.executable=first;
+  const store=new Store(dir);store.setSetting('agents.zcode.executable',selected);
+  const project=store.addProject('fixture',dir,'zcode');
+  const app=buildServer({cfg,store,docker:new Docker(),notifiers:[],scheduler:{tickNow(){}} as Scheduler});
+  t.after(async()=>{await app.close();store.close();rmSync(dir,{recursive:true,force:true});});
+  const result=await app.inject({method:'POST',url:`/api/projects/${project.id}/recheck`,headers:{'x-agentdesk-token':'fixture'},payload:{}});
+  assert.equal(result.statusCode,200);
+  const rows=result.json().report;
+  const agent=rows.find((row:any)=>row.tool==='zcode');
+  assert.equal(agent.path,selected);assert.equal(agent.version,'1.2.3');assert.equal(agent.ok,true);
+  assert.equal(rows.filter((row:any)=>row.name==='Git 工作区').length,1);
+  assert.ok(!rows.some((row:any)=>row.name==='项目目录'||row.tool==='codex'||row.tool==='deepseek'));
+});
 
 test('diagnosis recognizes startup evidence and ignores business text from successful runs', async t => {
   const dir = mkdtempSync(resolve('data', 'test-diagnostics-'));

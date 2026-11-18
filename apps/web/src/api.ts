@@ -1,7 +1,7 @@
 /** 前端共享类型与 API 客户端（与 daemon REST 一一对应） */
 
 import { taskStateLabel, type Project, type TaskView, type Run, type RunDetails, type TaskActions, type TaskState, type LanguagePreference } from '@agentdesk/core';
-import type { DiagnosticReport } from '@agentdesk/core';
+import type { DiagnosticReport, EnvironmentCheck } from '@agentdesk/core';
 export type { Project, TaskView as Task, Run } from '@agentdesk/core';
 
 export interface MergeStatus {
@@ -61,7 +61,6 @@ export const client = {
   createTask: (project: string | number, prompt: string, draft = false) =>
     api<{ task: TaskView }>('POST', '/api/tasks', { project, prompt, draft }),
   drafts: () => api<{ drafts: TaskView[] }>('GET', '/api/drafts'),
-  setup: () => api<{ report: Array<{ name: string; ok: boolean; detail: string; required: boolean }> }>('GET', '/api/setup/check'),
   projectFolders: (path?: string) => api<ProjectFolderListing>('POST', '/api/project-folders', { path }),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
@@ -70,7 +69,7 @@ export const client = {
   updateProject: (id: number, body: { agent_id?: string; model?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }) =>
     api<{ project: Project }>('PATCH', `/api/projects/${id}`, body),
   recheckProject: (id: number) =>
-    api<{ report: Array<{ name: string; ok: boolean; detail: string }> }>('POST', `/api/projects/${id}/recheck`),
+    api<{ report: Array<EnvironmentCheck & { name: string; detail: string }> }>('POST', `/api/projects/${id}/recheck`),
   deleteProject: (id: number) =>
     api<{ ok: boolean }>('DELETE', `/api/projects/${id}`),
   action: (id: number, type: string, feedback?: string, runId?: number) =>

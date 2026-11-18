@@ -1,3 +1,10 @@
+export interface EnvironmentCheck {
+  ok: boolean;
+  path?: string;
+  version?: string;
+  status?: string;
+}
+
 export interface DiagnosticFinding {
   code: string;
   level: 'error' | 'warning' | 'info';
@@ -6,6 +13,7 @@ export interface DiagnosticFinding {
   detail: string;
   evidence: Array<{ source: string; text: string }>;
   suggestions: string[];
+  check?: EnvironmentCheck;
 }
 
 export interface DiagnosticReport {

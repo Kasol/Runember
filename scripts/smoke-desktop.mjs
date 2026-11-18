@@ -32,7 +32,7 @@ app.on('browser-window-created',(_,win)=>{
  win.webContents.once('did-finish-load',async()=>{try{
   let before;for(let i=0;i<100;i++){before=await win.webContents.executeJavaScript('({title:document.title,guide:!!document.querySelector(".tour-overlay[open]"),body:document.body.innerText.slice(0,500)})');if(before.guide)break;await new Promise(r=>setTimeout(r,200));}
   await win.webContents.executeJavaScript('document.querySelector("[aria-label=关闭引导]")?.click();document.querySelector("[data-guide=environment]")?.click()');
-  let diagnosis=false;for(let i=0;i<100;i++){diagnosis=await win.webContents.executeJavaScript('!!document.querySelector(".diagnostic-finding")');if(diagnosis)break;await new Promise(r=>setTimeout(r,200));}
+  let diagnosis=false;for(let i=0;i<100;i++){diagnosis=await win.webContents.executeJavaScript('!!document.querySelector(".diagnostics .environment-check")');if(diagnosis)break;await new Promise(r=>setTimeout(r,200));}
   const help=Menu.getApplicationMenu().items.find(x=>x.label==='帮助')?.submenu.items.map(x=>x.label)||[];
   fs.writeFileSync(result,JSON.stringify({title:before.title,firstLaunchGuide:before.guide,diagnosis,offlineDiagnosisMenu:help.some(x=>x.includes('本机诊断')),node:process.versions.node,...(!before.guide?{body:before.body}:{})}));app.exit(0);
  }catch(e){fail(e)}});

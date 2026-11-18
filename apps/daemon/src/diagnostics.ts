@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { classifyDiagnosticError, redactDiagnosticText, sanitizeDiagnosticReport, runDetails, taskView, type DiagnosticFinding, type DiagnosticReport, type Run, type Task } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
-import { runDoctor } from './doctor.js';
+import { runDoctor, groupDoctorChecks } from './doctor.js';
 import { readRuntimeConfig } from './agent-settings.js';
 import { readRunLog } from './run-log.js';
 import { APP_VERSION } from './version.js';
@@ -88,9 +88,9 @@ export async function diagnoseStoredTask(cfg: AppConfig, taskId: number, runId?:
 
 export async function diagnoseEnvironment(cfg: AppConfig, agentId?: string, options: Parameters<typeof runDoctor>[1] = {}): Promise<DiagnosticReport> {
   const result = report('environment');
-  for (const row of await runDoctor(readRuntimeConfig(cfg), { ...options, agentId })) {
-    const item = finding(`environment:${row.name}`, row.ok ? 'info' : row.required ? 'error' : 'warning', row.name, redactDiagnosticText(row.detail),
-      row.ok ? [] : ['按检查说明处理，再重新运行诊断。']);
+  for (const row of groupDoctorChecks(await runDoctor(readRuntimeConfig(cfg), { ...options, agentId }))) {
+    const item = finding(`environment:${row.name}`, row.ok ? 'info' : row.required ? 'error' : 'warning', row.name, redactDiagnosticText(row.detail));
+    item.check = { ok: row.ok, path: row.path, version: row.version, status: row.status };
     result.findings.push(item);
   }
   const origin = `http://${cfg.server.host === '::1' ? '[::1]' : '127.0.0.1'}:${cfg.server.port}`;
