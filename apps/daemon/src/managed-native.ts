@@ -206,7 +206,7 @@ function finish(result) {
   process.exitCode = 0;
 }
 writeFileSync(control + '.active', '');
-if (requested()) { finish({ exitCode: null, cancelled: true }); return; }
+if (requested()) { finish({ exitCode: null, cancelled: true }); process.exit(0); }
 const child = spawn(cmd[0], cmd.slice(1), { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
 if (child.pid) writeFileSync(control + '.active', JSON.stringify({ kind: 'posix', pgid: child.pid, control }));
 const start = Date.now();

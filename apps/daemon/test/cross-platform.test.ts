@@ -28,7 +28,8 @@ test('POSIX cancellation confirms the managed process group has stopped', { skip
     await new Promise(r => setTimeout(r, 30));
   }
   writeFileSync(control + '.cancel', '');
-  await job;
+  const result = await job;
+  assert.equal(result.exitCode, 0, result.err.join('\n'));
   assert.equal(nativeExecution(control)?.cancelled, true);
   assert.equal(await stoppedNativeGroup(control, dir), true);
 });
