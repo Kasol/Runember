@@ -1,0 +1,94 @@
+name: Upload verified release assets
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful build workflow run ID
+        required: true
+      build_commit:
+        description: Exact commit used to build the application assets
+        required: true
+      release_id:
+        description: Existing draft release ID
+        required: true
+      release_commit:
+        description: Exact source commit selected for the release tag
+        required: true
+      tag:
+        description: Release tag
+        required: true
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: release-upload-${{ inputs.release_id }}
+  cancel-in-progress: false
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      BUILD_COMMIT: ${{ inputs.build_commit }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      RELEASE_COMMIT: ${{ inputs.release_commit }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Verify completed build and draft release
+        shell: bash
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID" > build.json
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > release.json
+          python3 - <<'PY'
+          import json, os, re
+          b=json.load(open('build.json')); r=json.load(open('release.json'))
+          assert b['status']=='completed' and b['conclusion']=='success'
+          assert b['head_sha']==os.environ['BUILD_COMMIT']
+          assert b['head_repository']['full_name']==os.environ['GH_REPO']
+          assert b['path']=='.github/workflows/build.yml'
+          assert r['draft'] and r['tag_name']==os.environ['RELEASE_TAG']
+          assert r['target_commitish']==os.environ['RELEASE_COMMIT']
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?',r['tag_name'])
+          PY
+      - name: Download exact build artifacts
+        shell: bash
+        run: gh run download "$BUILD_RUN_ID" --pattern 'Runember-*' --dir assets
+      - name: Verify hashes and upload missing assets
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          version=os.environ['RELEASE_TAG'][1:]; repo=os.environ['GH_REPO']; tag=os.environ['RELEASE_TAG']
+          required={f'runember-{version}-windows-x64.zip', f'Runember-{version}-win-x64.exe', f'Runember-{version}-win-x64.zip'}
+          for arch in ['arm64','x64']:
+              required.update({f'runember-{version}-macos-{arch}.tar.gz',f'Runember-{version}-mac-{arch}.dmg',f'Runember-{version}-mac-{arch}.zip'})
+          files={}; digests={}
+          for sidecar in pathlib.Path('assets').rglob('*.sha256'):
+              digest,name=sidecar.read_text().strip().split()
+              assert pathlib.Path(name).name==name and name in required
+              target=sidecar.parent/name
+              assert name not in files and hashlib.sha256(target.read_bytes()).hexdigest()==digest
+              for file in [target,sidecar]:
+                  files[file.name]=file
+                  digests[file.name]='sha256:'+hashlib.sha256(file.read_bytes()).hexdigest()
+          assert set(files)==required|{name+'.sha256' for name in required}
+          release=json.load(open('release.json')); present=set()
+          for asset in release['assets']:
+              assert asset['name'] in files
+              if asset['state']=='uploaded':
+                  assert asset['size']==files[asset['name']].stat().st_size and asset.get('digest')==digests[asset['name']]
+                  present.add(asset['name'])
+              else:
+                  assert asset['state'] in ['starter','new'] and not asset.get('digest')
+                  subprocess.run(['gh','api','--method','DELETE',f"repos/{repo}/releases/assets/{asset['id']}"],check=True)
+          missing=[str(file) for name,file in files.items() if name not in present]
+          if missing: subprocess.run(['gh','release','upload',tag,'--repo',repo,*missing],check=True)
+          verified=json.loads(subprocess.check_output(['gh','api',f"repos/{repo}/releases/{os.environ['RELEASE_ID']}"]))
+          assert verified['draft'] and verified['target_commitish']==os.environ['RELEASE_COMMIT']
+          assert {asset['name'] for asset in verified['assets']}==set(files)
+          for asset in verified['assets']:
+              assert asset['state']=='uploaded' and asset.get('digest')==digests[asset['name']]
+          print('Verified 18 release assets. Release remains a draft.')
+          PY

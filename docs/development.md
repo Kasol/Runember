@@ -35,3 +35,5 @@ npm run package:desktop -- dist/运行时目录名 dist/installers
 Windows 安装器默认按当前用户安装并保留卸载后的任务数据。当前预览包可能未签名。Mac 构建支持通过 CI secrets 提供 `CSC_LINK`、`CSC_KEY_PASSWORD` 和 Apple 公证凭证；配置前不得宣称已完成签名或公证，不要将凭证提交进仓库。
 
 新版本部署到已有用户环境前，先确认活动任务和运行实例，记录原程序、数据及日志位置。只停止归属明确的 daemon，不批量结束所有 Node 进程。
+
+本机网络上传大文件较慢时，可手动运行 `Upload verified release assets` 工作流，填写已成功的构建编号、构建提交、发布草稿 ID、标签提交和标签。它在 GitHub 构建机下载指定产物，核对全部 SHA-256 和已有资产的服务器摘要，只补传缺失文件，完成后仍保持草稿。维护者最终核对后再公开发布。
