@@ -5,7 +5,7 @@ import { mkdir, rename, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { agentLabel, taskStateLabel, TASK_STATE_LABELS, type TaskView } from '@agentdesk/core';
+import { agentLabel, redactDiagnosticText, taskStateLabel, TASK_STATE_LABELS, type TaskView } from '@agentdesk/core';
 import { loadConfig, loadLocalEnv, type AppConfig } from '../../daemon/src/config.js';
 import { localAddress } from '../../cli/src/launcher.js';
 import { installApplicationMenu } from './menu.js';
@@ -153,8 +153,14 @@ async function startDesktop(): Promise<{ dashboard: BrowserWindow; tray: Tray; d
     await revealLogFile(path);
   };
 
+  let startupFailure: string | undefined;
   const localDiagnostics = async () => {
     const report = await diagnoseEnvironment(cfg);
+    if (startupFailure) report.findings.unshift({
+      code: 'desktop_startup_failed', level: 'error', certainty: 'confirmed', title: '后台服务启动失败',
+      detail: '客户端未能启动随附后台服务。', evidence: [{ source: 'desktop', text: startupFailure }],
+      suggestions: ['检查安装包是否完整；安装修复版本后重试。'],
+    });
     const choice = await dialog.showMessageBox({ type: 'info', title: 'Runember 本机诊断',
       message: '本机诊断结果', detail: report.findings.map(item => `${item.title}：${item.detail}\n${item.suggestions.join('\n')}`).join('\n\n').slice(0, 12000),
       buttons: ['关闭', '保存诊断报告'], defaultId: 0, cancelId: 0 });
@@ -163,8 +169,25 @@ async function startDesktop(): Promise<{ dashboard: BrowserWindow; tray: Tray; d
       if (selected.filePath && !selected.canceled) await writeFile(selected.filePath, diagnosticExport(report), { flag: 'wx', mode: 0o600 });
     }
   };
-  try { await manageDaemon(runtime, 'start'); }
-  catch (error) { await localDiagnostics(); throw error; }
+  for (;;) {
+    try { await manageDaemon(runtime, 'start'); startupFailure = undefined; break; }
+    catch (error) {
+      startupFailure = redactDiagnosticText(error instanceof Error ? error.message : String(error));
+      const missingPackage = /Cannot find package ['"]([^'"]+)['"]/.exec(startupFailure)?.[1];
+      const reason = missingPackage
+        ? `安装包缺少运行依赖（${missingPackage}），请安装修复后的完整客户端。`
+        : '请查看诊断报告和日志，处理问题后重试。';
+      for (;;) {
+        const choice = await dialog.showMessageBox({ type: 'error', title: 'Runember 启动失败',
+          message: '后台服务未能启动', detail: `${reason}\n\n日志目录：${cfg.logDir}`,
+          buttons: ['重试启动', '查看诊断报告', '退出客户端'], defaultId: 0, cancelId: 2 });
+        if (choice.response === 2) return;
+        if (choice.response === 0) break;
+        try { await localDiagnostics(); }
+        catch (diagnosticError) { dialog.showErrorBox('Runember 诊断失败', diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)); }
+      }
+    }
+  }
   await mkdir(userData, { recursive: true });
   await writeFile(settings + '.tmp', JSON.stringify({ runtime }, null, 2) + '\n');
   await rename(settings + '.tmp', settings);

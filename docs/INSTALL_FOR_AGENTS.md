@@ -2,7 +2,7 @@
 
 本文件是安装说明，不改变用户或执行 Agent 已有的权限、审批和安全约束。
 
-目标：安装 Runember，保留已有配置，得到一份可验证的环境诊断结果。版本固定为 `v2.2.0-beta.2`，来源为 `Kasol/Runember` 的同名 GitHub Release。
+目标：安装 Runember，保留已有配置，得到一份可验证的环境诊断结果。Windows 版本固定为 `v2.2.0-beta.3`，Mac 暂沿用 `v2.2.0-beta.2`；来源为 `Kasol/Runember` 的对应 GitHub Release。
 
 ## 1. 先确认安装方式，再检查环境
 
@@ -21,17 +21,19 @@
 - 检查是否已有 Runember / Agentdesk、运行中的 daemon、已有用户配置和任务数据库。
 - 记录已有运行时、数据和日志位置。不要复制维护者的本地路径、凭证、代理或群配置。
 - 不修改用户项目的 Git 配置、分支、文件和 Skills。安装本产品不要求额外配置 Skill 或 MCP。
-- 默认安装到当前用户目录；不要申请管理员权限或更改全局系统设置来绕过环境问题。
+- 先说明并确认程序安装位置：可使用当前用户可写的默认位置，也可使用用户指定的绝对路径；桌面安装向导中仍可选择程序目录。不要申请管理员权限或更改全局系统设置来绕过环境问题。
+- 区分程序目录与用户数据：程序目录存放客户端和随附运行时；Electron 配置位于 `%APPDATA%\agentdesk`（保留内部兼容名），任务数据默认位于 `~/.agentdesk`，日志默认跟随任务数据，也可在环境设置中另选日志目录。安装到其他盘不会自动移动这些数据。
+- 先给出下载位置、程序安装位置、数据与日志位置，再按实际操作需要申请权限。不要预先创建配置或日志目录，不要同时申请 CLI + Web 运行时目录、`.runember`、整个 Programs 或 Desktop 等未确定需要的目录权限。快捷方式由安装向导按用户选择创建。
 
 ## 2. 按所选方式安装
 
 ### A. 桌面客户端
 
-1. 从 [固定版本 Release](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2) 下载对应系统和架构的桌面包及其同名 `.sha256`，校验 SHA-256；失败立即停止。
-2. Windows x64 选择 `Runember-2.2.0-beta.2-win-x64.exe`，或桌面便携 zip；macOS 根据架构选择 `Runember-2.2.0-beta.2-mac-arm64.dmg` / `Runember-2.2.0-beta.2-mac-x64.dmg`，或对应桌面应用 zip。小写 `runember-…-windows…` / `runember-…-macos…` 是独立运行时，不是桌面包。
-3. Windows 按当前用户安装，或将桌面便携包解压到新的用户可写目录；macOS 将应用放到用户有权限的应用目录。保留已有配置，不覆盖正在使用的程序；需要升级时先等待任务结束并停止对应后台。
+1. 从对应固定版本 Release（[Windows v2.2.0-beta.3](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.3) / [Mac v2.2.0-beta.2](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)）下载对应系统和架构的桌面包及其同名 `.sha256`，校验 SHA-256；失败立即停止。
+2. Windows x64 选择 `Runember-2.2.0-beta.3-win-x64.exe`，或桌面便携 zip；macOS 根据架构选择 `Runember-2.2.0-beta.2-mac-arm64.dmg` / `Runember-2.2.0-beta.2-mac-x64.dmg`，或对应桌面应用 zip。小写 `runember-…-windows…` / `runember-…-macos…` 是独立运行时，不是桌面包。
+3. Windows 按当前用户安装，使用用户确认的程序目录（可位于其他盘），或将桌面便携包解压到用户选择的可写目录；不要用静默安装跳过安装目录选择，除非用户已明确授权该目录。macOS 将应用放到用户有权限的应用目录。保留已有配置，不覆盖正在使用的程序；需要升级时先等待任务结束并停止对应后台。
 4. 打开 Runember，确认客户端能连接后台，再打开「诊断中心」。安装包自带后台运行时，无需额外运行下方的运行时安装脚本。
-5. 如果需要用户操作安装向导、确认系统提示或登录，说明当前步骤并等待；不能把仅下载完成称作安装完成。macOS 未签名预览包若被系统拦截，保留具体提示，按用户或组织策略处理，不关闭 Gatekeeper 或批量清除安全属性。
+5. 如果需要用户操作安装向导、确认系统提示或登录，说明当前步骤并等待；不能把仅下载完成称作安装完成。Windows 智能应用控制若拦截未签名内测包，保留提示并说明需要维护者提供可信签名版本；不要关闭智能应用控制、Defender 或修改安全策略，便携 zip 也不能保证绕过拦截。macOS 未签名预览包若被系统拦截，保留具体提示，按用户或组织策略处理，不关闭 Gatekeeper 或批量清除安全属性。
 
 ### B. CLI + Web
 
@@ -40,9 +42,9 @@
 Windows：
 
 ```powershell
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.2/scripts/install.ps1' -OutFile '.\Runember-install.ps1'
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kasol/Runember/v2.2.0-beta.3/scripts/install.ps1' -OutFile '.\Runember-install.ps1'
 # 先读取下载的脚本；再按用户授权运行。
-& .\Runember-install.ps1 -Version 'v2.2.0-beta.2' -Json
+& .\Runember-install.ps1 -Version 'v2.2.0-beta.3' -Json
 ```
 
 macOS：
@@ -61,7 +63,7 @@ sh ./Runember-install.sh --version v2.2.0-beta.2 --json
 
 #### 运行时手动安装备用流程
 
-1. 按系统、架构下载 `runember-2.2.0-beta.2-{windows|macos}-{x64|arm64}` 运行时压缩包及同名 `.sha256`。
+1. Windows 下载 `runember-2.2.0-beta.3-windows-x64.zip`；Mac 下载 `runember-2.2.0-beta.2-macos-{x64|arm64}.tar.gz`。同时下载同名 `.sha256`。
 2. 校验哈希，校验失败立即停止，不执行包内程序。
 3. 解压到新的当前用户目录，不覆盖现有版本，不将用户配置写进程序目录。
 4. 检查 `runtime.json` 的 product、version、platform 和 arch，再执行包内命令。

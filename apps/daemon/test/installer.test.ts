@@ -8,9 +8,10 @@ import test from 'node:test';
 test('Windows installer verifies downloads, preserves existing directories and reports setup needs', { skip: process.platform !== 'win32' }, t => {
   const dir = mkdtempSync(resolve('data', 'test-installer-'));
   t.after(() => rmSync(dir, { recursive:true, force:true }));
-  const folder = 'runember-2.2.0-beta.2-windows-x64';
+  const version = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).version;
+  const folder = `runember-${version}-windows-x64`;
   const source = join(dir, folder); mkdirSync(source);
-  writeFileSync(join(source,'runtime.json'), JSON.stringify({product:'Runember',version:'2.2.0-beta.2',platform:'win32',arch:'x64'}));
+  writeFileSync(join(source,'runtime.json'), JSON.stringify({product:'Runember',version,platform:'win32',arch:'x64'}));
   writeFileSync(join(source,'runember.cmd'), '@echo off\r\n"%~dp0node.exe" "%~dp0desk.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n');
   // Exercise the real UTF-8 Node boundary, including a GBK PowerShell parent.
   copyFileSync(process.execPath,join(source,'node.exe'));

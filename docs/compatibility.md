@@ -13,6 +13,12 @@
 
 CI 成功不等于真实模型连接通过；构建产物也不等于已经签名公证。未验证的组合保留「预览」标识。
 
+## Windows 打包与签名
+
+`npm run package:desktop -- <运行时目录> <新的输出目录>` 会在生成安装包前，从最终 `resources/agentdesk` 和 `app.asar` 取出副本，在源码目录之外验证后台启动、任务续跑、日志切换、桌面引导与启动失败恢复。缺少运行依赖会阻止打包完成，避免误用源码目录的 `node_modules` 通过验收。
+
+未配置签名时只生成未签名内测包，Windows 智能应用控制仍可能拦截。Windows 签名通过 `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD`（或通用 `CSC_LINK` / `CSC_KEY_PASSWORD`）交给 electron-builder；凭证由构建环境提供，不写入仓库。对外签名构建设置 `RUNEMBER_REQUIRE_WINDOWS_SIGNING=1`，缺少证书或签名失败即停止。需要受 Windows 信任的代码签名证书，自签名和 SHA-256 文件不能替代。签名后的安装包还需在开启智能应用控制的干净 Windows 上验收。[微软要求](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/code-signing-for-smart-app-control)
+
 ## Mac 实机验收清单
 
 请记录 macOS 版本、CPU 架构、Runember 版本及 Agent 版本。每个 Agent 的认证由测试者在自己的机器上完成，凭证不上传。

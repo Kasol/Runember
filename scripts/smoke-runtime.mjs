@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import net from 'node:net';
+import { smokeFixture } from './smoke-fixture.mjs';
 
-const runtime = resolve(process.argv[2]);
+const { fixture, runtime } = smokeFixture(process.argv[2], 'runtime');
 const manifest = JSON.parse(readFileSync(join(runtime, 'runtime.json'), 'utf8'));
 assert.equal(manifest.product, 'Runember'); assert.equal(manifest.platform, process.platform); assert.equal(manifest.arch, process.arch);
-mkdirSync(resolve('data'), { recursive: true });
-const fixture = mkdtempSync(resolve('data', 'runtime-smoke-'));
 const workspace = join(fixture, 'workspace space'), oldLogs = join(fixture, 'old-logs'), nextLogs = join(fixture, 'new-logs'), state = join(fixture, 'state');
 for (const directory of [workspace, oldLogs, nextLogs, state]) mkdirSync(directory, { recursive: true });
 writeFileSync(join(workspace, 'package.json'), '{"name":"runember-selftest"}');
@@ -19,10 +18,10 @@ writeFileSync(engine, `if(process.argv.join(' ').includes('simulate-start-failur
 const reserve = net.createServer(); await new Promise(r => reserve.listen(0, '127.0.0.1', r)); const port = reserve.address().port; await new Promise(r => reserve.close(r));
 const config = join(fixture, 'config.json');
 writeFileSync(config, JSON.stringify({ server: { host:'127.0.0.1', port }, dataDir: state, logDir: oldLogs, scheduler: { tickMs: 100 }, agents: { deepseek: { executable: engine } }, notify: { channels: [] }, feedback: {} }));
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGENTDESK_')));
+const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGENTDESK_') && !['NODE_PATH', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE'].includes(key)));
 Object.assign(env, { AGENTDESK_APP_DIR: runtime, AGENTDESK_CONFIG: config, USERPROFILE: fixture, HOME: fixture, DSH_HOME: join(fixture,'.dsh'), CODEX_HOME: join(fixture,'.codex') });
 const node = join(runtime, process.platform === 'win32' ? 'node.exe' : 'node');
-const cli = (...args) => execFileSync(node, [join(runtime,'desk.mjs'), ...args], { env, encoding:'utf8', windowsHide:true, timeout:30000 });
+const cli = (...args) => execFileSync(node, [join(runtime,'desk.mjs'), ...args], { cwd: runtime, env, encoding:'utf8', windowsHide:true, timeout:30000 });
 const base = 'http://127.0.0.1:' + port;
 const request = async (path, body, method = body ? 'POST' : 'GET') => {
   const response = await fetch(base + path, { method, headers: {'content-type':'application/json', connection:'close'}, body: body && JSON.stringify(body), signal: AbortSignal.timeout(10000) });

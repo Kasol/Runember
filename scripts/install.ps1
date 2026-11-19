@@ -1,5 +1,5 @@
 ﻿param(
-  [string]$Version = 'v2.2.0-beta.2',
+  [string]$Version = 'v2.2.0-beta.3',
   [string]$InstallDir,
   [switch]$Start,
   [switch]$Json

@@ -20,21 +20,39 @@ execFileSync(process.execPath, [process.env.npm_execpath, 'run', 'build', '-w', 
 const require = createRequire(join(desktop, 'package.json'));
 const { build, Platform, Arch } = require('electron-builder');
 const electronBinary = require('electron');
-execFileSync(process.execPath, [join(root, 'scripts/smoke-desktop.mjs'), runtime], { cwd:root, stdio:'inherit' });
 const electronDist = process.platform === 'darwin' ? resolve(electronBinary, '../../../..') : resolve(electronBinary, '..');
 const arch = process.arch === 'arm64' ? Arch.arm64 : Arch.x64;
 const target = process.argv.includes('--dir') ? ['dir'] : windows ? ['nsis', 'zip'] : ['dmg', 'zip'];
 const signedMac = process.platform === 'darwin' && !!process.env.CSC_LINK;
+const signedWindows = windows && !!(process.env.WIN_CSC_LINK || process.env.CSC_LINK);
+const requireWindowsSigning = windows && process.env.RUNEMBER_REQUIRE_WINDOWS_SIGNING === '1';
+if (requireWindowsSigning && !signedWindows) throw new Error('Windows 发布要求代码签名，请配置 WIN_CSC_LINK 或 CSC_LINK。');
+if (windows && !signedWindows) console.warn('正在构建未签名的 Windows 内测包；智能应用控制可能阻止安装。对外分发前需配置可信代码签名。');
 await build({ targets: (windows ? Platform.WINDOWS : Platform.MAC).createTarget(target, arch),
   publish: 'never', config: {
     appId: 'io.runember.desktop', productName: 'Runember',
     directories: { app: desktop, output },
     files: ['dist/main.mjs', 'dist/preload.cjs', 'assets/**/*', 'package.json'],
-    extraResources: [{ from: runtime, to: 'agentdesk', filter: ['**/*', '!**/.env', '!**/*.log', '!**/agentdesk.db*', '!**/daemon.lock'] }],
+    // electron-builder always skips a FileSet's root node_modules directory.
+    // Map it separately so the daemon's external packages reach the installed app.
+    extraResources: [
+      { from: runtime, to: 'agentdesk', filter: ['**/*', '!node_modules{,/**/*}', '!**/.env', '!**/*.log', '!**/agentdesk.db*', '!**/daemon.lock'] },
+      { from: join(runtime, 'node_modules'), to: 'agentdesk/node_modules', filter: ['**/*'] },
+    ],
+    afterPack: async context => {
+      const resources = windows ? join(context.appOutDir, 'resources') : join(context.appOutDir, 'Runember.app/Contents/Resources');
+      const installedRuntime = join(resources, 'agentdesk');
+      for (const args of [
+        ['scripts/smoke-runtime.mjs', installedRuntime],
+        ['scripts/smoke-desktop.mjs', installedRuntime, join(resources, 'app.asar')],
+        ['scripts/smoke-desktop.mjs', installedRuntime, join(resources, 'app.asar'), '--startup-failure'],
+      ]) execFileSync(process.execPath, args, { cwd: root, stdio: 'inherit' });
+    },
     extraMetadata: { name: 'agentdesk', version: manifest.version },
     npmRebuild: false, asar: true, electronDist,
     artifactName: 'Runember-${version}-${os}-${arch}.${ext}',
-    win: { target: ['nsis', 'zip'], signExecutable: false },
+    forceCodeSigning: requireWindowsSigning || signedWindows || signedMac,
+    win: { target: ['nsis', 'zip'], signExecutable: signedWindows },
     nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, deleteAppDataOnUninstall: false, createDesktopShortcut: true },
     mac: { target: ['dmg', 'zip'], category: 'public.app-category.developer-tools', hardenedRuntime: signedMac,
       identity: signedMac ? undefined : null,

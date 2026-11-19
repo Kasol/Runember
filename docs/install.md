@@ -1,6 +1,6 @@
 # 安装 Runember
 
-当前为 `v2.2.0-beta.2` 团队内测版。下载入口：[GitHub Release](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)。
+当前 Windows 团队内测版为 `v2.2.0-beta.3`：[下载 Windows 发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.3)。Mac 暂沿用 [v2.2.0-beta.2](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)，本轮尚未发布 Mac 安装包。
 
 ## 选择安装方式
 
@@ -16,10 +16,14 @@
 ### Windows
 
 1. 下载 `.exe` 安装程序，或将客户端 zip 解压到自己有写入权限的目录。
-2. 安装到当前用户目录，打开 `Runember.exe`。
+2. 在安装向导中选择程序安装目录，可以使用默认位置或其他盘上自己有写入权限的目录；安装完成后打开 `Runember.exe`。
 3. 首次启动使用随附运行时；已有用户会继续使用此前保存的运行时位置。
 
 无需先安装 Node.js。安装程序默认按当前用户安装，不要求把后台服务注册成系统服务。
+
+程序安装目录与用户数据目录是两回事：Electron 客户端配置在 `%APPDATA%\agentdesk`（保留内部兼容名），任务数据默认在 `%USERPROFILE%\.agentdesk`，日志默认跟随任务数据。把程序安装到 D 盘不会自动移动这些用户数据；日志目录可在环境设置中调整。
+
+未签名的内测安装包可能被 Windows「智能应用控制」拦截。遇到拦截请保留系统提示，等待维护者提供可信签名版本，不需要关闭系统安全功能。校验 SHA-256 只能核对下载文件，不能代替发布者的代码签名；便携 zip 中的程序也可能被拦截。[微软代码签名说明](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/code-signing-for-smart-app-control)
 
 ### Mac
 
@@ -61,7 +65,7 @@ Mac 解压后，在运行时目录执行：
 
 ## 让 Agent 自动安装
 
-使用 [Agent 安装说明](INSTALL_FOR_AGENTS.md)。Agent 会先请你选择「桌面客户端」或「CLI + Web」；你已经指定时直接按指定方式安装。
+使用 [Agent 安装说明](INSTALL_FOR_AGENTS.md)。Agent 会先请你选择「桌面客户端」或「CLI + Web」，并确认程序安装位置、说明用户数据位置；你已经指定时直接按指定方式安装。AI 的目录权限提示是对其文件操作的授权，不是安装目录选择器。
 
 选择桌面客户端时，下载对应系统和架构的桌面安装包；选择 CLI + Web 时，使用 `scripts/install.ps1` 或 `scripts/install.sh` 下载运行时并校验 SHA-256。脚本不要求预装 Node.js，不修改系统 PATH，不覆盖用户配置。
 
