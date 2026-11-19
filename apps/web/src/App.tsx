@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, client, setApiToken, taskStatusMeta, type Project, type Task, type ProjectFolder } from './api';
-import { agentLabel, readRunSummary, runStage, runTiming, reasoningLabel, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
+import { agentLabel, readRunSummary, runStage, runTiming, reasoningLabel, failureHint, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 import { ProjectFolderPicker } from './ProjectFolderPicker';
 import { RunLogViewer } from './RunLogViewer';
@@ -499,6 +499,7 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
       {task?.confirmation && <dl className="confirmation"><dt>请确认</dt><dd>{task.confirmation}</dd></dl>}
       {details ? <p className="run-facts">{runTiming(details)}</p> : data?.agentId && <p className="run-facts">Agent · {data.agentId}</p>}
       {(details || task) && !details?.reasoningEffort && <p className="dim">{reasoningLabel(details ? details.reasoningEffort : task?.reasoning_effort)}</p>}
+      {details?.network && <p className="dim">启动时 HTTPS 代理：{details.network.httpsProxy || '未指定'}</p>}
       {details?.cancellationRequestedAt && <dl className="run-details">
         <dt>请求取消</dt><dd>{new Date(details.cancellationRequestedAt).toLocaleString()}</dd>
         {details.stoppedAt && <><dt>执行器停止</dt><dd>{new Date(details.stoppedAt).toLocaleString()}</dd></>}
@@ -506,6 +507,13 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
         {!!details.filesChanged?.length && <><dt>工作区变更</dt><dd>{details.filesChanged.join('\n')}</dd></>}
       </dl>}
       {details?.diagnostic && <dl className="run-details"><dt>运行说明</dt><dd>{details.diagnostic}</dd></dl>}
+      {details?.failure && !data?.repeatedFailure && <p className="dim">{failureHint(details.failure)}</p>}
+      {details?.connection?.state === 'retrying' && task?.state === 'running' && <div className="banner" role="status">
+        <strong>连接重试中</strong><p>{details.connection.reason}</p>
+        <p>开始重连：{new Date(details.connection.since).toLocaleString()} · 最后有效活动：{new Date(details.connection.lastProgressAt).toLocaleString()}</p>
+        <p>执行器仍在运行。请检查环境设置中的代理和连接，可主动取消。</p>
+      </div>}
+      {data?.repeatedFailure && <div className="advice" role="note">💡 连续 {data.repeatedFailure.count} 轮出现同类故障。{data.repeatedFailure.hint}仍可主动续跑。</div>}
       {task && <div className="task-diagnostics"><button onClick={() => setDiagnosing(!diagnosing)}>{diagnosing ? '收起运行诊断' : '诊断此轮运行'}</button>
         {diagnosing && <Diagnostics task={task.id} run={selectedRunId ?? details?.id} />}</div>}
       {merge?.repo && merge.pr && (

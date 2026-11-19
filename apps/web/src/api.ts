@@ -13,6 +13,7 @@ export interface MergeStatus {
 
 export interface ProjectFolder { name: string; path: string }
 export interface LogSettings { currentDir: string; configuredDir: string; dataDir: string; restartRequired: boolean }
+export interface NetworkSettings { mode: 'custom' | 'inherit'; url: string; httpsProxy?: string; httpProxy?: string }
 export interface AgentInfo {
   id: string; label: string; available: boolean; modes: string[];
   models: Array<{ id: string; label: string; reasoningOptions?: ReasoningOption[] }>; defaultModel?: string;
@@ -48,13 +49,16 @@ export const client = {
   diagnose: (task?: number, run?: number) => api<DiagnosticReport>('GET', task ? `/api/tasks/${task}/diagnostics${run ? '?run=' + run : ''}` : '/api/diagnostics'),
   logSettings: () => api<LogSettings>('GET', '/api/settings/storage'),
   updateLogSettings: (logDir: string) => api<LogSettings>('PATCH', '/api/settings/storage', { logDir }),
+  networkSettings: () => api<NetworkSettings>('GET', '/api/settings/network'),
+  updateNetwork: (url: string) => api<NetworkSettings>('PATCH', '/api/settings/network', { url }),
+  testNetwork: (url: string) => api<{ ok: boolean; message: string }>('POST', '/api/settings/network/test', { url }),
   agents: (refresh = false) => api<{ agents: string[]; details: AgentInfo[] }>('GET', `/api/agents${refresh ? '?refresh=1' : ''}`),
   updateAgentPath: (id: string, executable: string) => api<{ details: AgentInfo[] }>('PATCH', `/api/settings/agents/${id}`, { executable }),
   dingtalkSettings: () => api<{ language: LanguagePreference }>('GET', '/api/settings/dingtalk'),
   updateDingtalkSettings: (language: LanguagePreference) => api<{ language: LanguagePreference }>('PATCH', '/api/settings/dingtalk', { language }),
   projects: () => api<{ projects: Project[] }>('GET', '/api/projects'),
   tasks: () => api<{ tasks: TaskView[] }>('GET', '/api/tasks'),
-  task: (id: number) => api<{ task: TaskView; runs: Run[]; details?: RunDetails; actions: TaskActions; agentId?: string; merge?: MergeStatus }>('GET', `/api/tasks/${id}`),
+  task: (id: number) => api<{ task: TaskView; runs: Run[]; details?: RunDetails; repeatedFailure?: { count: number; hint: string }; actions: TaskActions; agentId?: string; merge?: MergeStatus }>('GET', `/api/tasks/${id}`),
   runLog: (id: number, before?: number) => api<{ text: string; before: number | null }>(
     'GET', `/api/runs/${id}/log${before === undefined ? '' : `?before=${before}`}`,
   ),

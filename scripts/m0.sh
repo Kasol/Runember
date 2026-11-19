@@ -21,7 +21,10 @@ if [ -f .env ]; then
 fi
 
 # 国内环境：容器内 codex 访问 openai 需要代理。
-# 在 .env 里设 HTTPS_PROXY=http://host.docker.internal:7897（代理需开启 Allow LAN）
+# 在 .env 里设 AGENTDESK_PROXY__HTTPSPROXY=http://host.docker.internal:7897（代理需开启 Allow LAN）
+# 使用 Runember 专用变量，避免项目 .env 的 HTTPS_PROXY 被 Harness 的启动检查拒绝。
+HTTPS_PROXY="${HTTPS_PROXY:-${AGENTDESK_PROXY__HTTPSPROXY:-}}"
+HTTP_PROXY="${HTTP_PROXY:-${AGENTDESK_PROXY__HTTPPROXY:-}}"
 PROXY_FLAGS=()
 [ -n "${HTTPS_PROXY:-}" ] && PROXY_FLAGS+=(-e HTTPS_PROXY="$HTTPS_PROXY" -e https_proxy="$HTTPS_PROXY")
 [ -n "${HTTP_PROXY:-}" ]  && PROXY_FLAGS+=(-e HTTP_PROXY="$HTTP_PROXY" -e http_proxy="$HTTP_PROXY")

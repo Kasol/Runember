@@ -82,6 +82,23 @@ test('diagnostic redaction removes credentials from nested error snippets while 
   assert.ok(!value.includes(secret));
 });
 
+test('DeepSeek project environment refusal identifies the startup cause without treating successful text as an error', async t => {
+  const dir = mkdtempSync(resolve('data', 'test-deepseek-env-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'run.jsonl');
+  const message = 'Error: dsh: D:\\repo with spaces\\.env sets "HTTPS_PROXY", which only the launching environment may set; export HTTPS_PROXY';
+  writeFileSync(path, `[stderr] ${message}\n[stderr] at runCli (file:///cli.js:1:1)\n[stderr] Node.js v24.21.0\n`);
+  const task: Task = { id: 27, project_id: 1, agent_id: 'deepseek', status: 'failed', prompt: 'search', created_at: '' };
+  const run: Run = { id: 47, task_id: 27, kind: 'normal', agent_id: 'deepseek', status: 'failed', exit_code: 1, log_path: path };
+  const report = await diagnoseTask(task, run);
+  assert.equal(report.findings[0]?.code, 'project_env_rejected');
+  assert.equal(report.findings[0]?.certainty, 'confirmed');
+  assert.match(report.findings[0]!.evidence[0]!.text, /HTTPS_PROXY/);
+  assert.ok(!report.findings.some(item => item.code === 'executor_failed'));
+  const normal = await diagnoseTask({ ...task, status: 'done' }, { ...run, status: 'succeeded', exit_code: 0 });
+  assert.equal(normal.findings[0]?.code, 'normal_exit');
+});
+
 test('offline diagnosis is read-only and task API pins evidence to the selected Run', async t => {
   const dir = mkdtempSync(resolve('data', 'test-diagnostics-api-'));
   const cfg = loadConfig({ configPath: join(dir, 'absent.json'), dataDir: dir, logDir: dir });

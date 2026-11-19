@@ -8,6 +8,8 @@
 
 // ─────────────────────────── 领域类型 ───────────────────────────
 import { reasoningLabel } from './reasoning.js';
+import { executionFailure, executionErrorMessage, failureHint, type ExecutionFailure } from './execution-errors.js';
+export * from './execution-errors.js';
 
 export type AgentId = string;
 export function agentLabel(id?: string | null): string {
@@ -96,12 +98,42 @@ export interface Task {
   created_at: string;
 }
 
+export interface RunConnection {
+  state: 'retrying' | 'recovered';
+  since: string;
+  lastProgressAt: string;
+  reason: string;
+  warnedAt?: string;
+  recoveredAt?: string;
+}
+
+/** Legacy rows are interpreted from their primary diagnostic without rewriting stored status. */
+export function runFailure(run: Run): ExecutionFailure | undefined {
+  if (run.exit_code === 0 || run.status === 'cancelled') return;
+  const text = readRunSummary(run)?.diagnostic;
+  return text ? executionFailure(text) : undefined;
+}
+
+export function repeatedRunFailure(runs: Run[]): { count: number; hint: string; code: string } | undefined {
+  let first: ExecutionFailure | undefined;
+  let count = 0;
+  for (const run of [...runs].reverse()) {
+    if (run.status === 'starting' || run.status === 'running' || run.status === 'queued') continue;
+    const failure = runFailure(run);
+    if (!failure || first && failure.fingerprint !== first.fingerprint) break;
+    first ??= failure; count++;
+  }
+  return first && count >= 2 ? { count, code: first.code, hint: failureHint(first) } : undefined;
+}
+
 export interface Run {
   id: number;
   task_id: number;
   agent_id?: AgentId | null;
   model?: string | null;
   reasoning_effort?: string | null;
+  connection?: RunConnection;
+  network?: { httpsProxy?: string; httpProxy?: string };
   kind: 'normal' | 'resume';
   /** adapter 会话 id（codex thread id），续跑的钥匙 */
   session_id?: string;
@@ -148,18 +180,21 @@ export interface TaskView extends Task {
   state: TaskState;
   confirmation?: string;
   stopping?: boolean;
+  reconnecting?: boolean;
 }
 
-export function taskStateLabel(task: Pick<TaskView, 'state' | 'stopping'>, language: UiLanguage = 'zh-CN'): string {
+export function taskStateLabel(task: Pick<TaskView, 'state' | 'stopping' | 'reconnecting'>, language: UiLanguage = 'zh-CN'): string {
   if (language === 'en') {
     const labels: Record<TaskState, string> = {
       draft: '📝 Draft', queued: '⏳ Queued', running: '▶️ Running',
       awaiting_confirmation: '🟡 Awaiting confirmation', ended: '⏹ Ended', cancelled: '🚫 Cancelled',
     };
-    return task.state === 'running' && task.stopping ? `${labels.running} · Stopping` : labels[task.state];
+    return task.state === 'running' && task.stopping ? `${labels.running} · Stopping`
+      : task.state === 'running' && task.reconnecting ? `${labels.running} · Reconnecting` : labels[task.state];
   }
   return task.state === 'running' && task.stopping
-    ? `${TASK_STATE_LABELS.running} · 正在停止` : TASK_STATE_LABELS[task.state];
+    ? `${TASK_STATE_LABELS.running} · 正在停止` : task.state === 'running' && task.reconnecting
+      ? `${TASK_STATE_LABELS.running} · 连接重试中` : TASK_STATE_LABELS[task.state];
 }
 
 export interface TaskActions {
@@ -179,6 +214,9 @@ export interface RunDetails {
   agentId?: AgentId;
   model?: string;
   reasoningEffort?: string | null;
+  failure?: ExecutionFailure;
+  connection?: RunConnection;
+  network?: Run['network'];
   elapsedMs?: number;
   stage: string;
   exitCode?: number;
@@ -264,7 +302,7 @@ function runInputRequest(run: Run | undefined, summary: RunSummary | undefined):
 
 export function taskView(task: Task, run?: Run): TaskView {
   const status = task.status;
-  if (status === 'running') return { ...task, state: status, stopping: !!run?.cancellation };
+  if (status === 'running') return { ...task, state: status, stopping: !!run?.cancellation, reconnecting: run?.connection?.state === 'retrying' };
   if (status !== 'blocked' && status !== 'failed' && status !== 'done') return { ...task, state: status };
   const confirmation = status === 'blocked' ? runInputRequest(run, readRunSummary(run)) : undefined;
   return { ...task, state: confirmation ? 'awaiting_confirmation' : 'ended', confirmation };
@@ -273,9 +311,10 @@ export function taskView(task: Task, run?: Run): TaskView {
 export function runStage(run: Run): string {
   if ((run.status === 'starting' || run.status === 'running') && run.cancellation) return '正在停止';
   if (run.status === 'starting') return '准备执行';
-  if (run.status === 'running') return '运行中';
+  if (run.status === 'running') return run.connection?.state === 'retrying' ? '连接重试中' : '运行中';
   if (run.status === 'queued') return '排队';
   if (run.status === 'cancelled') return '已取消';
+  if (run.blocked_kind !== 'timeout' && runFailure(run)?.code === 'network_failed') return '连接失败';
   switch (run.blocked_kind) {
     case 'timeout': return '运行超时';
     case 'interrupted': return '运行中断';
@@ -327,9 +366,10 @@ export function runDetails(run: Run, agentId?: AgentId, remaining?: string | nul
   return {
     id: run.id, agentId: run.agent_id ?? nonBlank(summary?.agentId) ?? agentId, model: nonBlank(summary?.model) ?? run.model ?? undefined,
     reasoningEffort: run.reasoning_effort ?? null, stage: runStage(run),
+    failure: runFailure(run), connection: run.connection, network: run.network,
     exitCode: run.exit_code === -1 ? undefined : run.exit_code ?? undefined,
     elapsedMs: Number.isFinite(ended - started) ? Math.max(0, ended - started) : undefined,
-    summary: text, diagnostic: nonBlank(summary?.diagnostic), confirmation: runInputRequest(run, summary), blocker,
+    summary: text, diagnostic: nonBlank(summary?.diagnostic) ? executionErrorMessage(summary!.diagnostic!) : undefined, confirmation: runInputRequest(run, summary), blocker,
     remaining: nonBlank(summary?.remaining) ?? report?.remaining
       ?? (remaining === '（agent 未给出明细）' ? undefined : nonBlank(remaining)),
     artifacts: [...artifacts.values()],
@@ -349,6 +389,7 @@ export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): 
       '执行器请求受限': 'Agent request limited', '正常退出': 'Normal exit', '异常退出': 'Non-zero exit',
       '启动失败': 'Startup failed', '执行异常': 'Execution error', '已停止': 'Stopped',
       '启动检查未通过': 'Startup check failed', '正在停止': 'Stopping',
+      '连接重试中': 'Reconnecting', '连接失败': 'Connection failed',
     };
     const elapsed = details.elapsedMs === undefined ? '' : ` · ${(details.elapsedMs / 1000).toFixed(1)} seconds`;
     const exit = details.exitCode === undefined ? '' : ` · Exit code ${details.exitCode}`;
@@ -362,6 +403,7 @@ export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────
 
 export interface ClassifyInput {
+  primaryError?: string;
   exitCode: number | null;
   killed: boolean;
   interrupted?: boolean;
@@ -383,11 +425,11 @@ export function classifyRun(input: ClassifyInput): ClassifyResult {
   const inputRequest = nonBlank(input.inputRequest) ?? parseInputRequest(input.lastAgentText);
   if (inputRequest) return { status: 'blocked', blockedKind: 'approval_needed', inputRequest };
   if (input.exitCode === 0) return { status: 'succeeded' };
-  const t = input.errTail.toLowerCase();
-  if (/401|unauthorized|not logged in|未登录|invalid api key/.test(t)) {
+  const failure = executionFailure(input.primaryError || input.errTail);
+  if (failure?.code === 'authentication_failed') {
     return { status: 'blocked', blockedKind: 'auth_missing' };
   }
-  if (/429|usage limit|rate limit|quota|额度|exceeded your/.test(t)) {
+  if (failure?.code === 'rate_limited') {
     return { status: 'blocked', blockedKind: 'quota_exhausted' };
   }
   return { status: 'failed', blockedKind: 'unknown_error' };
@@ -480,10 +522,13 @@ export interface AdapterEvent {
   /** 这条答复明确请求的必需输入，与该答复一起更新。 */
   inputRequest?: string;
   activity?: AgentActivity;
+  /** A model stream advanced; no reasoning text is exposed as user activity. */
+  progress?: boolean;
 }
 
 /** 通知器：daemon 只发领域事件，实现方决定发到哪（Console/钉钉/企微/邮件…） */
-export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskActions } & (
+export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskActions; repeatedFailure?: { count: number; hint: string } } & (
+  | { kind: 'run.connection_warning' | 'run.connection_recovered'; task: Task; project: Project; connection: RunConnection }
   | { kind: 'run.started'; task: Task; project: Project }
   | { kind: 'run.cancelled'; task: Task; project: Project; summary: RunSummary }
   | { kind: 'run.succeeded'; task: Task; project: Project; summary: RunSummary }
@@ -493,6 +538,7 @@ export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskA
 export interface Notifier {
   readonly name: string;
   notify(event: NotifyEvent): Promise<void>;
+  retryReport?(runId: number): number;
 }
 
 /** 执行后端：Docker 是 v1 唯一实现；未来 NativeBackend（免 Docker 个人机模式） */

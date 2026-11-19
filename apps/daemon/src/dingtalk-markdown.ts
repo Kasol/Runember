@@ -1,17 +1,20 @@
 /**
  * 钉钉查询和通知共用的运行详情文案。
  */
-import { runTiming, stripAgentctlLines, taskStateLabel, type NotifyEvent, type RunDetails, type UiLanguage } from '@agentdesk/core';
+import { runTiming, stripAgentctlLines, taskStateLabel, failureHint, type NotifyEvent, type RunDetails, type UiLanguage } from '@agentdesk/core';
 
 export function runDetailsMarkdown(details: RunDetails, showConfirmation: boolean, language: UiLanguage = 'zh-CN'): string {
   const t = (zh: string, en: string) => language === 'en' ? en : zh;
   return [
     showConfirmation && details.confirmation ? `**${t('等待确认', 'Confirmation needed')}**\n\n${details.confirmation}` : '',
     runTiming(details, language),
+    details.network ? `${t('启动时 HTTPS 代理', 'HTTPS proxy at launch')} · ${details.network.httpsProxy || t('未指定', 'Unspecified')}` : '',
+    details.connection?.state === 'retrying' ? `**${details.stage === '连接重试中' ? t('连接重试中', 'Reconnecting') : t('停止前的连接重试', 'Connection retries before exit')}** · ${t(details.connection.reason, 'The Agent reported connection errors.')}\n\n${t('开始重连', 'Retrying since')}：${details.connection.since}\n\n${t('最后有效活动', 'Last meaningful progress')}：${details.connection.lastProgressAt}` : '',
     details.cancellationRequestedAt ? `**${t('请求取消', 'Cancellation requested')}** · ${details.cancellationRequestedAt}` : '',
     details.cancellationRequestedAt && details.stoppedAt ? `**${t('执行器停止', 'Executor stopped')}** · ${details.stoppedAt}` : '',
     details.stopIssue ? `**${t('停止进度', 'Stopping progress')}**\n\n${details.stopIssue}` : '',
     details.diagnostic ? `**${t('运行说明', 'Run diagnostic')}**\n\n${details.diagnostic}` : '',
+    details.failure ? `**${t('处理建议', 'Suggested action')}**\n\n${failureHint(details.failure, language === 'en')}` : '',
     details.blocker ? `**${t('卡点', 'Blocker')}**\n\n${details.blocker}` : '',
     details.remaining ? `**${t('待完成', 'Remaining work')}**\n\n${details.remaining}` : '',
     details.artifacts.length ? [`**${t('产物', 'Artifacts')}**`, ...details.artifacts.map(artifact => {
@@ -44,7 +47,15 @@ export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?
     const title = taskStateLabel({ state: 'running' }, language);
     return { title, text: [`### ${title}`, task, `Run #${e.runId} · ${e.project.agent_id} · ${t('准备执行', 'Preparing')}`, excerpt(e.task.prompt, 180), detailLink].join('\n\n') };
   }
-  const summary = e.kind === 'run.failed' ? undefined : e.summary;
+  if (e.kind === 'run.connection_warning' || e.kind === 'run.connection_recovered') {
+    const recovered = e.kind === 'run.connection_recovered';
+    const title = recovered ? t('▶️ Agent 已恢复活动', '▶️ Agent activity resumed') : t('⚠️ 连接重试中', '⚠️ Reconnecting');
+    return { title, text: [`### ${title}`, task, `Run #${e.runId}`, recovered ? t('已观察到 Agent 恢复有效活动，任务继续执行。', 'Meaningful Agent activity has resumed; the run continues.')
+      : t('持续连接重试超过 2 分钟，期间未观察到新的有效活动。执行器仍在运行。', 'Connection retries have lasted over 2 minutes without meaningful progress. The executor is still running.'),
+      t(e.connection.reason, 'The Agent reported connection errors.'), `${t('最后有效活动', 'Last meaningful progress')} · ${e.connection.lastProgressAt}`,
+      recovered ? '' : t('请检查环境设置中的代理和连接。不会自动新开任务；可查看状态或主动取消。', 'Check the proxy and connection in Environment settings. No new run is started automatically; inspect status or cancel if needed.')].filter(Boolean).join('\n\n') };
+  }
+  const summary = 'summary' in e ? e.summary : undefined;
   const details: RunDetails = e.details ?? {
     id: e.runId, agentId: e.project.agent_id,
     stage: e.kind === 'run.failed' ? t('执行异常', 'Execution error') : t('已停止', 'Stopped'),
@@ -68,6 +79,8 @@ export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?
       waiting && details.confirmation ? `**${t('等待确认', 'Confirmation needed')}**\n\n${excerpt(details.confirmation, 360)}` : '',
       runTiming(details, language),
       details.stopIssue || details.diagnostic ? `${t('运行说明', 'Run diagnostic')} · ${excerpt(details.stopIssue || details.diagnostic, 140)}` : '',
+      e.repeatedFailure ? t(`💡 连续 ${e.repeatedFailure.count} 轮出现同类故障。${e.repeatedFailure.hint}`, `💡 ${e.repeatedFailure.count} consecutive runs encountered the same failure. Consider checking the connection or account.`) : '',
+      !e.repeatedFailure && details.failure ? failureHint(details.failure, language === 'en') : '',
       details.blocker ? `${t('卡点', 'Blocker')} · ${excerpt(details.blocker, 140)}` : '',
       details.remaining ? `${t('待完成', 'Remaining work')} · ${excerpt(details.remaining, 140)}` : '',
       details.summary ? `**${t('Agent 答复', 'Agent response')}**\n\n${excerpt(details.summary, 220)}` : '',

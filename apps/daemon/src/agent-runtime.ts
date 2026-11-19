@@ -9,6 +9,7 @@ import type { Store } from './store.js';
 import type { AppConfig } from './config.js';
 import { zcodeBridgeMain } from './zcode-bridge.js';
 import { reasoningOption, type ReasoningOption } from '@agentdesk/core';
+import { applyNetworkSettings } from './network-settings.js';
 
 interface NativeAgent { command: string[]; env: string[]; executable: string }
 
@@ -19,7 +20,7 @@ export function runtimeConfig(cfg: AppConfig, store: Pick<Store, 'getSetting'>):
     const saved = store.getSetting(`agents.${id}.executable`);
     if (saved !== undefined) agents[id] = { ...agents[id]!, executable: saved };
   }
-  return { ...cfg, agents };
+  return applyNetworkSettings({ ...cfg, agents }, store);
 }
 
 function isFile(path: string): boolean { try { return statSync(path).isFile(); } catch { return false; } }

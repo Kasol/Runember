@@ -8,6 +8,7 @@ import { runDoctor, groupDoctorChecks } from './doctor.js';
 import { readRuntimeConfig } from './agent-settings.js';
 import { readRunLog } from './run-log.js';
 import { APP_VERSION } from './version.js';
+import { networkSettings } from './network-settings.js';
 
 function report(scope: DiagnosticReport['scope']): DiagnosticReport {
   return { schemaVersion: 1, product: 'Runember', generatedAt: new Date().toISOString(), scope,
@@ -27,7 +28,7 @@ export function errorEvidence(log: string): string[] {
       const event = JSON.parse(raw);
       const kind = event.type ?? event.event?.type;
       if (kind === 'turn.failed' || kind === 'error' || (kind === 'item.completed' && event.item?.type === 'error')) {
-        const text = event.error?.message ?? event.payload?.message ?? event.message ?? event.item?.message;
+        const text = event.error?.message ?? event.payload?.message ?? event.message ?? event.item?.message ?? event.item?.text;
         if (typeof text === 'string') lines.push(text);
       }
     } catch { /* A bounded log tail can start in the middle of a JSON line. */ }
@@ -46,6 +47,12 @@ export async function diagnoseTask(task: Task, run?: Run): Promise<DiagnosticRep
   if (state.state === 'cancelled') {
     result.findings.push(finding('cancelled', 'info', '执行器已确认取消', '取消前产生的文件和外部操作按实际结果保留。', ['如需处理已有改动，先查看本轮日志和工作区变更。'])); return result;
   }
+  if (state.state === 'running' && run.connection?.state === 'retrying') {
+    result.findings.push(finding('connection_retrying', 'warning', 'Agent 最近处于连接重试中',
+      `${run.connection.reason}；开始重连：${run.connection.since}；最后有效活动：${run.connection.lastProgressAt}。`,
+      ['执行器仍未结算，请在环境设置检查代理和连接；可主动取消。']));
+    return result;
+  }
   const errors: Array<{ source: string; text: string }> = [];
   if (details.diagnostic) errors.push({ source: `Run #${run.id} 运行说明`, text: details.diagnostic });
   if (run.log_path) {
@@ -53,7 +60,10 @@ export async function diagnoseTask(task: Task, run?: Run): Promise<DiagnosticRep
     catch { result.findings.push(finding('log_unavailable', 'warning', '运行日志不可读取', '本轮记录的日志文件已移动、删除或无法访问。', ['检查原日志目录；修改日志设置不会自动迁移历史日志。'])); }
   }
   const failed = run.exit_code !== undefined && run.exit_code !== null && run.exit_code !== 0 || ['failed', 'blocked', 'interrupted'].includes(run.status);
-  if (failed) for (const error of errors) {
+  // A primary executor diagnostic outranks shutdown telemetry and optional MCP warnings.
+  const primary = errors.length && details.diagnostic ? classifyDiagnosticError(details.diagnostic, errors[0]!.source) : undefined;
+  if (failed && primary) result.findings.push(primary);
+  if (failed && !primary) for (const error of errors) {
     const match = classifyDiagnosticError(error.text, error.source);
     if (match && !result.findings.some(item => item.code === match.code)) result.findings.push(match);
   }
@@ -79,9 +89,11 @@ export async function diagnoseStoredTask(cfg: AppConfig, taskId: number, runId?:
     const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as unknown as Task | undefined;
     if (!task) throw new Error('任务不存在。');
     const raw = (runId === undefined ? db.prepare('SELECT * FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1').get(taskId)
-      : db.prepare('SELECT * FROM runs WHERE id=? AND task_id=?').get(runId, taskId)) as (Run & { execution_json?: string }) | undefined;
+      : db.prepare('SELECT * FROM runs WHERE id=? AND task_id=?').get(runId, taskId)) as (Run & { execution_json?: string; connection_json?: string; network_json?: string }) | undefined;
     if (runId !== undefined && !raw) throw new Error('该 Run 不属于当前任务。');
-    const run = raw ? { ...raw, execution: raw.execution_json ? JSON.parse(raw.execution_json) : undefined } : undefined;
+    const run = raw ? { ...raw, execution: raw.execution_json ? JSON.parse(raw.execution_json) : undefined,
+      connection: raw.connection_json ? JSON.parse(raw.connection_json) : undefined,
+      network: raw.network_json ? JSON.parse(raw.network_json) : undefined } : undefined;
     return await diagnoseTask(task, run);
   } finally { db.close(); }
 }
@@ -93,6 +105,8 @@ export async function diagnoseEnvironment(cfg: AppConfig, agentId?: string, opti
     item.check = { ok: row.ok, path: row.path, version: row.version, status: row.status };
     result.findings.push(item);
   }
+  const network = networkSettings(readRuntimeConfig(cfg), { getSetting: () => undefined });
+  result.findings.push(finding('agent_proxy', 'info', 'Agent 宿主代理', network.httpsProxy || '未指定代理，沿用进程环境。'));
   const origin = `http://${cfg.server.host === '::1' ? '[::1]' : '127.0.0.1'}:${cfg.server.port}`;
   let lock: { instanceId?: string } | undefined;
   try { lock = JSON.parse(readFileSync(join(cfg.dataDir, 'daemon.lock'), 'utf8')); } catch {}

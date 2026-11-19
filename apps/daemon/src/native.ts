@@ -62,9 +62,11 @@ export function findHostCodex(): string | undefined {
 export function hostCodexProxyEnv(proxy: AppConfig['proxy']): string[] {
   const https = proxy.nativeHttpsProxy || proxy.httpsProxy;
   const http = proxy.nativeHttpProxy || proxy.httpProxy;
+  const bypass = [...new Set([...(process.env.NO_PROXY || process.env.no_proxy || '').split(',').map(value => value.trim()).filter(Boolean), 'localhost', '127.0.0.1', '::1', '[::1]'])].join(',');
   return [
     ...(https ? [`HTTPS_PROXY=${https}`, `https_proxy=${https}`] : []),
     ...(http ? [`HTTP_PROXY=${http}`, `http_proxy=${http}`] : []),
+    ...(https || http ? [`NO_PROXY=${bypass}`, `no_proxy=${bypass}`] : []),
   ];
 }
 
@@ -98,6 +100,7 @@ export interface NativeSpawnOpts {
   env?: string[];
   timeoutMs: number;
   onStdoutLine?: (line: string) => void;
+  onStderrLine?: (line: string) => void;
   logFile?: string;
 }
 
@@ -145,7 +148,7 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
       };
     };
     const flushStdout = collect(child.stdout, out, onStdoutLine);
-    const flushStderr = collect(child.stderr, err);
+    const flushStderr = collect(child.stderr, err, opts.onStderrLine);
 
     let settled = false;
     let drainTimer: NodeJS.Timeout | undefined;

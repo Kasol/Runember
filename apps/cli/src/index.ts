@@ -9,7 +9,7 @@
  *   retry <taskId> / cancel <taskId>
  *   auth [codex]
  */
-import { agentLabel, runStage, runTiming, reasoningLabel, taskStateLabel, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
+import { agentLabel, runStage, runTiming, reasoningLabel, taskStateLabel, failureHint, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -161,19 +161,40 @@ async function main(): Promise<void> {
       console.log(`自动化合并已入队 #${task.id}。查看进度: npm run desk -- status ${task.id}`);
       return;
     }
+    case 'proxy': {
+      if (!rest.length) {
+        const settings = await api('GET', '/api/settings/network');
+        console.log(`宿主 Agent HTTPS 代理 · ${settings.httpsProxy || '未指定，沿用进程环境'}`);
+        console.log('desk proxy set <http://主机:端口|auto> | desk proxy test');
+        return;
+      }
+      if (rest[0] === 'set' && rest[1] && rest.length === 2) {
+        await api('PATCH', '/api/settings/network', { url: rest[1] === 'auto' ? '' : rest[1] });
+        console.log('✅ 已保存，下一轮宿主任务生效。'); return;
+      }
+      if (rest[0] === 'test' && rest.length === 1) {
+        const settings = await api('GET', '/api/settings/network');
+        const result = await api('POST', '/api/settings/network/test', { url: settings.url });
+        console.log(`${result.ok ? '✅' : '❌'} ${result.message}`); if (!result.ok) process.exitCode = 1; return;
+      }
+      throw new Error('用法: desk proxy | proxy set <地址|auto> | proxy test');
+    }
     case 'status': {
       const id = rest[0] ? Number(rest[0].replace(/^#/, '')) : undefined;
       if (rest[0] && (!id || !Number.isSafeInteger(id) || id < 1)) throw new Error('请输入有效任务编号');
       if (id) {
-        const { task, runs, details, actions, agentId, merge } = await api('GET', `/api/tasks/${id}`) as {
-          task: TaskView; runs: Run[]; details?: RunDetails; actions: TaskActions; agentId?: string;
+        const { task, runs, details, repeatedFailure, actions, agentId, merge } = await api('GET', `/api/tasks/${id}`) as {
+          task: TaskView; runs: Run[]; details?: RunDetails; repeatedFailure?: { count: number; hint: string }; actions: TaskActions; agentId?: string;
           merge?: { repo?: string; pr?: number; completed?: string };
         };
         console.log(`任务 #${task.id} [${taskStateLabel(task)}]`);
         if (task.state === 'running') console.log(`查看 Agent 进展 · desk activity ${id}`);
+        if (repeatedFailure) console.log(`💡 连续 ${repeatedFailure.count} 轮出现同类故障。${repeatedFailure.hint}仍可主动续跑。`);
         if (task.confirmation) console.log(`请确认\n${task.confirmation}\n`);
         if (details) {
           console.log(runTiming(details));
+          if (details.network) console.log(`启动时 HTTPS 代理 · ${details.network.httpsProxy || '未指定'}`);
+          if (details.connection?.state === 'retrying' && task.state === 'running') console.log(`连接重试中 · ${details.connection.reason}\n开始重连 · ${details.connection.since}\n最后有效活动 · ${details.connection.lastProgressAt}`);
           if (details.cancellationRequestedAt) {
             console.log(`请求取消 · ${details.cancellationRequestedAt}`);
             if (details.stoppedAt) console.log(`执行器停止 · ${details.stoppedAt}`);
@@ -181,6 +202,7 @@ async function main(): Promise<void> {
           }
           if (details.stopIssue) console.log(`停止进度 · ${details.stopIssue}`);
           if (details.diagnostic) console.log(`运行说明\n${details.diagnostic}`);
+          if (details.failure && !repeatedFailure) console.log(failureHint(details.failure));
           if (details.blocker) console.log(`卡点\n${details.blocker}`);
           if (details.remaining) console.log(`待完成\n${details.remaining}`);
           for (const artifact of details.artifacts) console.log(`产物 · ${artifact.label} · ${artifact.location}`);
@@ -282,7 +304,7 @@ async function main(): Promise<void> {
         const { findNativeAgent } = await import('../../daemon/src/agent-runtime.js');
         const codex = findNativeAgent('codex', readRuntimeConfig(cfg))?.command[0];
         if (!codex) throw new Error('找不到宿主 Codex，请先运行 desk doctor');
-        process.exitCode = await loginHostCodex(codex, cfg.proxy, !!values['device-auth']);
+        process.exitCode = await loginHostCodex(codex, readRuntimeConfig(cfg).proxy, !!values['device-auth']);
         return;
       }
       const r = await api('POST', '/api/auth/login', { agent_id });
@@ -293,7 +315,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.log('Runember CLI —— 命令: start | stop | logs | doctor | auth | agents | project | draft | run | merge | status | activity | resume | retry | cancel | notify-test');
+      console.log('Runember CLI —— 命令: start | stop | logs | doctor | auth | agents | proxy | project | draft | run | merge | status | activity | resume | retry | cancel | notify-test');
       console.log('  例: npm run desk -- doctor       # 环境自检');
       console.log('      npm run desk -- project add demo D:/work/demo');
       console.log('      npm run desk -- run demo "给 README 加一节安装说明"');

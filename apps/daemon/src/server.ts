@@ -5,7 +5,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import { availableAgents } from '@agentdesk/adapters';
 import { readFileSync, createReadStream, existsSync } from 'node:fs';
-import { runDetails, taskView, type Notifier, type TaskStatus } from '@agentdesk/core';
+import { runDetails, taskView, repeatedRunFailure, type Notifier, type TaskStatus } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
@@ -26,6 +26,7 @@ import { agentCatalog, runtimeConfig, validateAgentPath, refreshAgentDiscovery, 
 import { agentDefinitions } from '@agentdesk/adapters';
 import { logSettings, validateLogDirectory } from './log-settings.js';
 import { diagnoseTask, diagnoseEnvironment } from './diagnostics.js';
+import { networkSettings, saveNetworkSettings, testNativeConnection, validateNativeProxy } from './network-settings.js';
 
 export function buildServer(deps: {
   cfg: AppConfig; store: Store; scheduler: Scheduler; docker: Docker; notifiers: Notifier[];
@@ -84,6 +85,24 @@ export function buildServer(deps: {
   });
 
   app.get('/api/settings/storage', async (_req, reply) => reply.header('cache-control', 'no-store').send(logSettings(cfg, store)));
+  app.get('/api/settings/network', async (_req, reply) => reply.header('cache-control', 'no-store').send(networkSettings(cfg, store)));
+  for (const test of [false, true]) app.route<{ Body: { url?: unknown } }>({
+    method: test ? 'POST' : 'PATCH', url: test ? '/api/settings/network/test' : '/api/settings/network',
+    handler: async (req, reply) => {
+      const localOrigin = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname.toLowerCase()) &&
+        [`http://${req.host}`, `https://${req.host}`].includes(req.headers.origin ?? '');
+      if (!cfg.server.token && (!isLoopback(req.ip) || !!req.headers.origin && !localOrigin)) return reply.code(403).send({ error: '修改代理或检测连接需要本机看板或连接密钥' });
+      try {
+        if (test) {
+          const value = validateNativeProxy(req.body?.url);
+          const probeConfig = value ? { ...cfg, proxy: { ...cfg.proxy, nativeHttpsProxy: value, nativeHttpProxy: value } } : cfg;
+          return await testNativeConnection(probeConfig);
+        }
+        saveNetworkSettings(store, req.body?.url);
+        return networkSettings(cfg, store);
+      } catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
+    },
+  });
   app.patch<{ Body: { logDir?: unknown } }>('/api/settings/storage', async (req, reply) => {
     const localOrigin = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname.toLowerCase()) &&
       [`http://${req.host}`, `https://${req.host}`].includes(req.headers.origin ?? '');
@@ -360,6 +379,7 @@ export function buildServer(deps: {
     return {
       task: taskView(t, last), runs, agentId,
       details: last && runDetails(last, agentId, t.partial_remaining),
+      repeatedFailure: repeatedRunFailure(runs),
       actions: merge && !canManageMerge(req.ip)
         ? { resume: false, retry: false, cancel: false } : availableTaskActions(store, t),
       merge: merge && { repo: merge.state.repo, pr: merge.state.pr, verified: merge.state.verified, completed: merge.state.completed },

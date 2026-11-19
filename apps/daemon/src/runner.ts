@@ -13,7 +13,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { classifyRun, taskStatusAfterRun, parseResultMarker, readRunSummary, runDetails } from '@agentdesk/core';
+import { classifyRun, taskStatusAfterRun, parseResultMarker, readRunSummary, runDetails, repeatedRunFailure } from '@agentdesk/core';
 import { availableTaskActions } from './actions.js';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit, hostGitOperation } from './hostgit.js';
@@ -22,6 +22,8 @@ import { prepareMcpConfig } from './mcp.js';
 import { hostCodexLoginStatus, hostCodexProxyEnv } from './native.js';
 import { findNativeAgent, prepareNativeAgent, runtimeConfig } from './agent-runtime.js';
 import { nativeExecution, runManagedNative, stoppedNativeGroup } from './managed-native.js';
+import { ConnectionWatch } from './connection-watch.js';
+import { networkSettings } from './network-settings.js';
 import type { Task, Project, Run, RunSummary } from '@agentdesk/core';
 
 export interface RunnerDeps {
@@ -80,7 +82,7 @@ export class Runner {
   /** 一次性容器执行命令（与生产语义一致：超时杀、用完删） */
   private async spawn(opts: {
     image: string; cmd: string[]; binds: string[]; env: string[];
-    timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+    timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void; onStderrLine?: (l: string) => void;
     onContainer?: (id: string) => void;
     beforeStart?: (id: string) => boolean;
   }): Promise<SpawnResult> {
@@ -118,7 +120,7 @@ export class Runner {
       timer = setTimeout(() => { killed = true; void container.kill().catch(() => {}); }, opts.timeoutMs);
       stream = await container.logs({ follow: true, stdout: true, stderr: true }) as Readable;
       const stdout = lineSink(l => { out.push(l); opts.onStdoutLine?.(l); });
-      const stderr = lineSink(l => err.push(l));
+      const stderr = lineSink(l => { err.push(l); opts.onStderrLine?.(l); });
       const drained = finished(stream, { cleanup: true }).catch(error => {
         err.push(`读取容器日志异常：${(error as Error).message}`);
       });
@@ -218,13 +220,14 @@ export class Runner {
   /** Native 路径：codex 直接跑宿主（无容器）。与 Docker 路径产出同构的 SpawnResult */
   private async runNativePath(opts: {
     adapterImage: string; cmd: string[]; cwd: string; env: string[];
-    timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void;
+    timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void; onStderrLine?: (l: string) => void;
     control: string;
     onPid: (pid: number) => void;
   }): Promise<SpawnResult> {
     const main = await runManagedNative({
       cmd: opts.cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
       onStdoutLine: opts.onStdoutLine,
+      onStderrLine: opts.onStderrLine,
     }, opts.control, opts.onPid);
     const execution = nativeExecution(opts.control);
     if (!execution && existsSync(opts.control + '.active')) throw new Error('宿主进程树停止结果无法核实');
@@ -417,6 +420,10 @@ export class Runner {
         { diagnostic: `无法创建任务日志 ${logPath}：${(error as Error).message}`, filesChanged: [], diffStat: '' });
     }
     store.updateRun(run.id, { log_path: logPath });
+    if ((project.execution ?? 'capability') === 'capability') {
+      const network = networkSettings(cfg, store);
+      store.updateRun(run.id, { network: { httpsProxy: network.httpsProxy, httpProxy: network.httpProxy } });
+    }
     events.emit({ kind: 'run.started', runId: run.id, task, project });
 
     let logWriteFailed = false;
@@ -477,6 +484,7 @@ export class Runner {
     const isCapability = executionMode === 'capability';
     let cleanupConfig: (() => void) | undefined;
     let cleanupAgent: (() => void) | undefined;
+    let connectionTimer: ReturnType<typeof setInterval> | undefined;
 
     try {
       if (!isCapability) {
@@ -574,10 +582,25 @@ export class Runner {
       const native = isNative ? prepareNativeAgent({ id: project.agent_id, cmd, model: project.model, reasoningEffort: project.reasoning_effort, cwd: project.workspace_path, runId: run.id, cfg }) : undefined;
       if (native) { cleanupAgent = native.cleanup; nativeEnv.push(...native.env); }
       const control = logPath + '.control';
+      const watch = new ConnectionWatch({
+        changed: connection => store.updateRun(run.id, { connection }),
+        notify: (kind, connection) => {
+          const current = store.getRun(run.id);
+          if (current && ['starting', 'running'].includes(current.status) && !current.cancellation) events.emit({ kind, connection, runId: run.id, task, project,
+            details: runDetails(current, project.agent_id) });
+        },
+      });
+      const streamedErrors = new Set<string>();
+      connectionTimer = setInterval(() => {
+        const current = store.getRun(run.id);
+        if (current && ['starting', 'running'].includes(current.status) && !current.cancellation) watch.tick();
+      }, 1000);
       const onLine = (line: string) => {
         record(line + '\n');
         const ev = adapter.parseLine(line, !!responseSchemaPath);
         if (!ev) return;
+        if (ev.type === 'error' && ev.text) watch.error(ev.text);
+        if (ev.progress || ev.type === 'agent_message' && ev.text || ev.activity && (ev.activity.kind !== 'turn' || ev.activity.phase === 'completed')) watch.progress();
         if (ev.activity) {
           try { store.recordRunActivity(run.id, { ...ev.activity, at: new Date().toISOString() }); }
           catch (error) {
@@ -597,6 +620,11 @@ export class Runner {
         if (ev.type === 'error' && ev.text) lastAgentError = ev.text;
         if (ev.type === 'input_requested' && ev.text?.trim()) inputRequest = ev.text;
       };
+      const onStderrLine = (line: string) => {
+        streamedErrors.add(line);
+        record('[stderr] ' + line + '\n');
+        watch.stderr(line);
+      };
       if (isNative) store.updateRun(run.id, { worker: { kind: 'native', pid: 0, control } });
       const main = isNative
         ? await this.runNativePath({
@@ -605,18 +633,21 @@ export class Runner {
             timeoutMs: tmo, tag: `run-${run.id}`,
             control,
             onStdoutLine: onLine,
+            onStderrLine,
             onPid: pid => store.updateRun(run.id, { status: 'running', worker: { kind: 'native', pid, control } }),
           })
         : await this.spawn({
             image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
             onStdoutLine: onLine,
+            onStderrLine,
             beforeStart: id => {
               store.updateRun(run.id, { worker: { kind: 'docker', id } });
               return !store.getRun(run.id)?.cancellation;
             },
             onContainer: id => store.updateRun(run.id, { status: 'running', worker: { kind: 'docker', id } }),
           });
-      for (const l of main.err) record('[stderr] ' + l + '\n');
+      clearInterval(connectionTimer);
+      for (const line of main.err) if (!streamedErrors.has(line)) record('[stderr] ' + line + '\n');
 
       // ④ 收尾：记录运行结果与工作区观察。
       const execution = main.execution!;
@@ -634,6 +665,7 @@ export class Runner {
         lastAgentText,
         inputRequest: inputRequest ?? replyInputRequest,
         errTail: [...main.err.slice(-20), lastAgentError].join('\n'),
+        primaryError: lastAgentError || undefined,
       });
       // 旧会话仍可能报告部分完成，保留未完成项供续跑。
       const report = parseResultMarker(lastAgentText);
@@ -667,6 +699,7 @@ export class Runner {
         { status: 'failed', blockedKind: 'unknown_error' },
         { diagnostic: `执行器异常：${e?.message ?? e}`, filesChanged: [], diffStat: '' }, logPath);
     } finally {
+      clearInterval(connectionTimer);
       cleanupConfig?.();
       cleanupAgent?.();
     }
@@ -707,6 +740,7 @@ export class Runner {
 
     const saved = store.getTask(task.id) ?? task;
     const event = { runId, task: saved, project, details: runDetails(store.getRun(runId)!, project.agent_id, saved.partial_remaining),
+      repeatedFailure: repeatedRunFailure(store.runsOfTask(task.id)),
       actions: availableTaskActions(store, saved, 'dingtalk') };
     if (result.status === 'cancelled') {
       if (logPath) {

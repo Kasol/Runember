@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { client, type AgentInfo } from './api';
 import { Modal } from './ui';
 import { LogDirectorySettings } from './LogDirectorySettings';
+import { NetworkSettings } from './NetworkSettings';
 
 export function AgentSettings({ onClose }: { onClose: () => void }) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -16,6 +17,7 @@ export function AgentSettings({ onClose }: { onClose: () => void }) {
   useEffect(() => { void refresh(); }, []);
   return <Modal title="环境设置" onClose={onClose} layout="setup">
     <LogDirectorySettings />
+    <NetworkSettings />
     <h4 className="settings-section-title">Agent 执行器</h4>
     <p className="agent-settings-intro">{refreshing ? '正在查找可用路径…' : '选择已检测到的可用路径；点击「自动选择」会立即应用第一个检测结果。'}</p>
     {error && <p className="form-err" role="alert">{error}</p>}

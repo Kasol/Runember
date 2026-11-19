@@ -84,7 +84,7 @@ export class Store {
       );
     `);
     const runCols = this.db.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>;
-    for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json']) {
+    for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json', 'connection_json', 'network_json']) {
       if (!runCols.some(col => col.name === field)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${field} TEXT`);
     }
     for (const [table, fields] of [['projects', ['model', 'reasoning_effort']], ['tasks', ['agent_id', 'model', 'execution', 'reasoning_effort']], ['runs', ['agent_id', 'model', 'reasoning_effort']]] as const) {
@@ -314,15 +314,17 @@ export class Store {
     }, isMerge ? 'queued' : 'blocked');
   }
   private parseRun(row: (Run & {
-    worker_json?: string; cancellation_json?: string; execution_json?: string; recent_activity_json?: string;
+    worker_json?: string; cancellation_json?: string; execution_json?: string; recent_activity_json?: string; connection_json?: string; network_json?: string;
   }) | undefined): Run | undefined {
     if (!row) return undefined;
-    const { worker_json, cancellation_json, execution_json, recent_activity_json, ...run } = row;
+    const { worker_json, cancellation_json, execution_json, recent_activity_json, connection_json, network_json, ...run } = row;
     return {
       ...run,
       worker: worker_json ? JSON.parse(worker_json) as Run['worker'] : undefined,
       cancellation: cancellation_json ? JSON.parse(cancellation_json) as Run['cancellation'] : undefined,
       execution: execution_json ? JSON.parse(execution_json) as Run['execution'] : undefined,
+      connection: connection_json ? JSON.parse(connection_json) as Run['connection'] : undefined,
+      network: network_json ? JSON.parse(network_json) as Run['network'] : undefined,
     };
   }
   getRun(id: number): Run | undefined {
@@ -365,11 +367,12 @@ export class Store {
     const cur = this.getRun(id)!;
     const next = { ...cur, ...patch };
     this.db.prepare(
-      'UPDATE runs SET status=?, session_id=?, checkpoint_sha=?, worker_json=?, cancellation_json=?, execution_json=?, exit_code=?, blocked_kind=?, log_path=?, summary_json=?, started_at=?, ended_at=? WHERE id=?',
+      'UPDATE runs SET status=?, session_id=?, checkpoint_sha=?, worker_json=?, cancellation_json=?, execution_json=?, exit_code=?, blocked_kind=?, log_path=?, summary_json=?, started_at=?, ended_at=?, connection_json=?, network_json=? WHERE id=?',
     ).run(next.status, next.session_id ?? null, next.checkpoint_sha ?? null, next.worker ? JSON.stringify(next.worker) : null,
       next.cancellation ? JSON.stringify(next.cancellation) : null, next.execution ? JSON.stringify(next.execution) : null,
       next.exit_code ?? null, next.blocked_kind ?? null,
-      next.log_path ?? null, next.summary_json ?? null, next.started_at ?? null, next.ended_at ?? null, id);
+      next.log_path ?? null, next.summary_json ?? null, next.started_at ?? null, next.ended_at ?? null,
+      next.connection ? JSON.stringify(next.connection) : null, next.network ? JSON.stringify(next.network) : null, id);
   }
   close(): void {
     this.db.close();

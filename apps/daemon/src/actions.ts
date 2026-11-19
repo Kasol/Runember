@@ -1,5 +1,5 @@
 /** HTTP API 和钉钉共用的任务动作。 */
-import { describeActivity, runDetails, taskStateLabel, taskView } from '@agentdesk/core';
+import { describeActivity, runDetails, taskStateLabel, taskView, repeatedRunFailure } from '@agentdesk/core';
 import type { FeedbackAction, RunActivity, Task, TaskActions, UiLanguage } from '@agentdesk/core';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
@@ -139,11 +139,13 @@ export async function applyTaskAction(
     const details = run && runDetails(run, task.agent_id ?? 'codex', task.partial_remaining);
     const merge = store.getMerge(id);
     const actions = availableTaskActions(store, task, origin);
+    const repeated = repeatedRunFailure(store.runsOfTask(id));
     return reply([
       t(`### 📋 任务 #${id} · ${projectName(task.project_id)}`, `### 📋 Task #${id} · ${projectName(task.project_id)}`),
       `**${stateLabel(view)}**`,
       !run ? `Agent · ${task.agent_id ?? 'codex'}${task.model ? ' / ' + task.model : ''}` : '',
       details ? runDetailsMarkdown(details, view.state === 'awaiting_confirmation', language) : '',
+      repeated ? t(`💡 连续 ${repeated.count} 轮出现同类故障，可参考上方处理建议，仍可主动续跑。`, `💡 ${repeated.count} consecutive runs encountered the same failure. Review the suggested action above; you can still continue manually.`) : '',
       origin === 'dingtalk' && run ? [
         t('**最近活动（最多 10 条）**', '**Recent activity (up to 10)**'),
         formatActivity(store.recentRunActivities(run.id), language),
@@ -217,8 +219,10 @@ export async function applyTaskAction(
       store.setPendingFeedback(id, feedback);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
+      const repeated = repeatedRunFailure(store.runsOfTask(id));
+      const suggestion = repeated ? t(`\n\n💡 此前连续 ${repeated.count} 轮出现同类故障。${repeated.hint}`, `\n\n💡 ${repeated.count} prior runs encountered the same failure. Consider checking the connection or account.`) : '';
       return reply(t(`⏳ 任务 ${title} 已入队，将${actions.resume === 'session' ? '恢复原会话' : '以新会话继续'}。\n\n${feedback}`,
-        `⏳ Task ${title} queued. ${actions.resume === 'session' ? 'The previous session will resume.' : 'A new session will start.'}\n\n${feedback}`));
+        `⏳ Task ${title} queued. ${actions.resume === 'session' ? 'The previous session will resume.' : 'A new session will start.'}\n\n${feedback}`) + suggestion);
     }
     case 'retry': {
       if (merge && origin === 'dingtalk') return fail('自动化合并任务请通过 CLI retry 继续。');

@@ -12,6 +12,7 @@ export class DeepseekAdapter implements AgentAdapter {
   parseLine(line: string): AdapterEvent | null {
     try {
       const event = JSON.parse(line);
+      if (event.type === 'thinking') return { type: 'other', progress: true };
       if (event.type === 'session' && typeof event.sessionId === 'string') return { type: 'session', sessionId: event.sessionId };
       if (event.type === 'final' && typeof event.text === 'string') return { type: 'agent_message', text: event.text };
       if (event.type === 'error') return { type: 'error', text: typeof event.message === 'string' ? event.message : 'DeepSeek Harness error' };

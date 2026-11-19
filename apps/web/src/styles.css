@@ -79,6 +79,8 @@ button.danger:hover { background: #fde8ea; }
 .agent-settings-list { display: grid; gap: 18px; }
 .settings-section-title { font-size: 15px; margin: 24px 0 12px; }
 .log-restart-note { font-size: 12.5px; line-height: 1.7; color: #8a6d00; background: #fff8df; padding: 10px 12px; border-radius: 6px; overflow-wrap: anywhere; }
+.network-settings { margin-top: 18px; }
+.advice { padding: 10px 12px; border-radius: 8px; background: #f6f8fa; color: #57606a; font-size: 13px; line-height: 1.8; }
 .agent-path-card { display: grid; gap: 12px; padding: 18px; border: 1px solid #e1e6ec; border-radius: 12px; background: #fff; }
 .agent-path-heading { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 .agent-path-heading h4 { font-size: 15px; }

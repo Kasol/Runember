@@ -50,10 +50,11 @@ export class DingTalkNotifier extends DedupedNotifier {
 
   protected async send(e: NotifyEvent): Promise<void> {
     const want = this.ch.events ?? ['blocked', 'failed'];
-    if (!want.includes(e.kind.replace('run.', ''))) return;
+    const connection = e.kind === 'run.connection_warning' || e.kind === 'run.connection_recovered';
+    if (!want.includes(connection ? 'failed' : e.kind.replace('run.', ''))) return;
     const language = this.language();
     let reportFailed = false;
-    const reportUrl = await this.reportLink?.(e, language).catch(error => {
+    const reportUrl = connection ? undefined : await this.reportLink?.(e, language).catch(error => {
       console.warn(`[dingtalk-report] task=${e.task.id} run=${e.runId} ${(error as Error).message}`);
       reportFailed = true;
       return undefined;

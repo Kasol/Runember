@@ -91,7 +91,7 @@ export class DingTalkReports {
   }
 
   publish: ReportLink = (event, language = 'zh-CN') => {
-    if (event.kind === 'run.started') return Promise.resolve(undefined);
+    if (event.kind === 'run.started' || event.kind.startsWith('run.connection_')) return Promise.resolve(undefined);
     const existing = this.pending.get(event.runId);
     if (existing) return existing;
     const job = this.tail.catch(() => {}).then(() => this.create(event, language));

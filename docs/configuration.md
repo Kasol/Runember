@@ -49,6 +49,14 @@ CLI 可用 `runember project set 项目名 --reasoning-effort high` 指定，`--
 
 仅在确有需要时配置；不要照抄维护者的端口。对应环境变量为 `AGENTDESK_PROXY__NATIVEHTTPSPROXY` 和 `AGENTDESK_PROXY__NATIVEHTTPPROXY`。
 
+顶部「环境设置 → Agent 网络代理」可选择沿用启动配置，或指定 HTTP/HTTPS 代理地址。默认不添加代理覆盖；界面保存的地址对下一轮宿主 Agent 及其子进程生效，不修改系统代理、Agent 全局文件、容器代理或通知渠道。使用代理时保留原有 NO_PROXY 规则，并让 localhost / 本机回环地址直连，供本机 MCP、开发服务使用。恢复「沿用启动配置」会移除这项覆盖。CLI 对应 `runember proxy`、`runember proxy set http://127.0.0.1:端口`、`runember proxy set auto` 和 `runember proxy test`。
+
+连接检测只访问 Codex 服务，不携带账号凭证、不调用模型。HTTP 401/403 表示服务返回了响应，不代表账号或模型验证通过；代理认证失败（407）和连接超时会明确提示。它不能保证其他供应商或长连接均正常。新 Run 会记录启动时的代理地址（不含认证信息），旧 Run 不推测历史代理设置。
+
+Agent 持续报告连接错误时，任务仍为「运行中」，详情显示连接重试及最后有效活动时间；持续重连 2 分钟且没有有效进展会按已有失败通知订阅告警一次，恢复有效活动后提示一次。单纯长时间执行工具不会触发此告警。运行停止后显示「已结束 · 连接失败」或实际超时原因，连续同因失败会提示先检查连接，但不会阻止手动续跑或自动重放任务。已有任务状态和 Agent 会话保留。
+
+DeepSeek Harness 不允许项目 `.env` 声明 `HTTPS_PROXY` / `HTTP_PROXY` 等启动变量，即使父进程已有同名变量也会拒绝启动。请使用上述 Runember 配置，由执行器通过进程环境传入；或在 Harness 用户级配置中设置代理。Runember 不会自动删除用户项目的 `.env` 或绕过这项检查。容器探针使用 `AGENTDESK_PROXY__HTTPSPROXY` / `AGENTDESK_PROXY__HTTPPROXY`，不要在宿主中使用 `host.docker.internal` 作为代理地址。
+
 ## 钉钉（可选）
 
 首次安装可跳过。需要手机派单时，创建自己的钉钉企业内部应用机器人，使用 Stream 模式，发布后加入目标群。

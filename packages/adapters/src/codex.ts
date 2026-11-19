@@ -9,6 +9,7 @@ interface CodexItem {
   id?: string;
   type?: string;
   text?: string;
+  message?: string;
   command?: string;
   changes?: unknown[];
   tool?: string;
@@ -75,6 +76,8 @@ export class CodexAdapter implements AgentAdapter {
           const item = msg.item as CodexItem | undefined;
           if (!item) return null;
           const started = msg.type === 'item.started';
+          if (item.type === 'reasoning') return { type: 'other', progress: true };
+          if (!started && item.type === 'error') return { type: 'error', text: item.message ?? item.text ?? 'Codex item failed' };
           if (!started && item.type === 'agent_message' && typeof item.text === 'string') {
             const final = structuredResponse ? parseFinalResponse(item.text) : undefined;
             if (final) return final;

@@ -1,3 +1,5 @@
+import { AUTH_ERROR, NETWORK_ERROR } from './execution-errors.js';
+
 export interface EnvironmentCheck {
   ok: boolean;
   path?: string;
@@ -59,15 +61,21 @@ const rules: Array<{ code: string; pattern: RegExp; title: string; detail: strin
   { code: 'provider_config_missing', pattern: /无法定位.*Provider Config|供应商配置不存在|provider.*config.*(?:not found|missing)|Missing provider runtime paths/i,
     title: 'Agent 供应商配置缺失或路径不正确', detail: 'Agent 在建立模型连接前无法读取所需配置。',
     suggestions: ['在环境设置中重新检测 Agent 的 CLI 路径。', '在该 Agent 客户端完成供应商配置和登录；保留原有用户配置。', '如果 Agent 本身可以正常启动，更新 Runember 后重试。'] },
-  { code: 'authentication_failed', pattern: /auth_missing|未登录|无法确认登录|not.authenticated|invalid.api.key|authentication.failed|unauthorized|HTTP\s*401/i,
+  { code: 'project_env_rejected', pattern: /dsh: .+\.env sets "[^"\r\n]+", which only the launching environment may set/i,
+    title: 'DeepSeek 拒绝项目中的启动环境配置', detail: 'Harness 在启动模型前拒绝了项目 .env 中的受限变量；这不是模型登录失败。',
+    suggestions: ['查看错误证据中的变量名，将它移到启动进程的环境配置；代理也可由 DeepSeek 用户级 .env 配置。', 'Runember 代理使用 AGENTDESK_PROXY__NATIVEHTTPSPROXY / AGENTDESK_PROXY__NATIVEHTTPPROXY，由执行器传入子进程。', '修改前核对项目对该变量的用途；不要删除整个 .env、绕过 Harness 校验或更改用户全局配置。'] },
+  { code: 'authentication_failed', pattern: AUTH_ERROR,
     title: 'Agent 或通知渠道认证失败', detail: '运行记录中存在明确的认证错误。',
     suggestions: ['使用运行后台服务的系统账号，在对应 Agent 中重新登录。', '如果错误来自通知渠道，检查机器人或文档授权；不要把密钥贴进任务提示词。'] },
   { code: 'permission_denied', pattern: /EACCES|EPERM|access.*denied|permission denied|拒绝访问|无权访问/i,
     title: '文件或执行权限不足', detail: '运行时访问文件、目录或启动进程被系统拒绝。',
     suggestions: ['检查出错路径是否可访问、可写，以及 CLI 是否可执行。', '核对后台服务的运行账号；先保留工作区现场，再处理具体权限。'] },
-  { code: 'network_failed', pattern: /ECONNRESET|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|TLS|SSL|fetch failed|connection.*(?:failed|reset)|网络.*(?:失败|超时)/i,
+  { code: 'mcp_startup_invalid', pattern: /MCP.*(?:目录名称无效|directory name is invalid|os error 267|ENOENT|not found)/i,
+    title: 'Agent 的 MCP 启动配置无效', detail: '日志显示 MCP 服务无法从指定的命令或工作目录启动。',
+    suggestions: ['在对应 Agent 的 MCP 或插件配置中核对启动命令、工作目录和插件路径占位符。', '确认该配置适用于 CLI；修复后用独立只读任务验证工具可用。'] },
+  { code: 'network_failed', pattern: NETWORK_ERROR,
     title: '外部连接异常', detail: '日志包含网络、DNS、代理或 TLS 连接错误；具体原因仍需结合目标服务确认。',
-    suggestions: ['检查对应服务能否连接，以及当前代理设置是否有效。', '区分模型服务、MCP 和通知连接；先检查错误证据中的来源。'] },
+    suggestions: ['在环境设置中检查宿主 Agent 代理，并运行连接检测；账号状态检查不能代替模型连接验证。', '区分模型服务、MCP 和通知连接；修复连接后继续原会话。'] },
   { code: 'executable_missing', pattern: /ENOENT|未发现.*CLI|找不到.*CLI|not recognized|command not found|executable.*not found/i,
     title: '执行入口或依赖未找到', detail: '运行记录显示执行入口或其依赖不存在。',
     suggestions: ['打开环境设置，检测或手动选择实际 CLI 文件。', '安装对应 Agent 后完成登录，再运行环境诊断。'] },
