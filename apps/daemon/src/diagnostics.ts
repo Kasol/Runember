@@ -47,6 +47,11 @@ export async function diagnoseTask(task: Task, run?: Run): Promise<DiagnosticRep
   if (state.state === 'cancelled') {
     result.findings.push(finding('cancelled', 'info', '执行器已确认取消', '取消前产生的文件和外部操作按实际结果保留。', ['如需处理已有改动，先查看本轮日志和工作区变更。'])); return result;
   }
+  if (state.state === 'running' && run.connection?.state === 'inactive') {
+    result.findings.push(finding('agent_inactive', 'info', '长时间没有 Agent 可见活动',
+      `最近可见活动：${run.connection.lastVisibleActivityAt ?? run.connection.lastProgressAt}。执行器仍在运行，长耗时工具可能暂时没有新活动。`,
+      ['查看最近活动和日志，自行决定是否取消；系统不会因此停止任务。'])); return result;
+  }
   if (state.state === 'running' && run.connection?.state === 'retrying') {
     result.findings.push(finding('connection_retrying', 'warning', 'Agent 最近处于连接重试中',
       `${run.connection.reason}；开始重连：${run.connection.since}；最后有效活动：${run.connection.lastProgressAt}。`,

@@ -73,7 +73,7 @@ test('English notifications translate scheduler labels and offer only the contin
     details: { id: 3, stage: '正常退出', exitCode: 0, artifacts: [], summary: '原始 Agent 答复' },
     actions: { resume: false, retry: true, cancel: false },
   }, '', undefined, 'en');
-  assert.equal(markdown.title, '⏹ Ended');
+  assert.equal(markdown.title, '⏹ Ended · Normal exit');
   assert.match(markdown.text, /Normal exit · Exit code 0/);
   assert.match(markdown.text, /Agent response/);
   assert.match(markdown.text, /continue 55/);

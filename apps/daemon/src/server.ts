@@ -5,7 +5,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import { availableAgents } from '@agentdesk/adapters';
 import { readFileSync, createReadStream, existsSync } from 'node:fs';
-import { runDetails, taskView, repeatedRunFailure, type Notifier, type TaskStatus } from '@agentdesk/core';
+import { runDetails, taskView, repeatedRunFailure, validateTaskTimeout, type Notifier, type TaskStatus } from '@agentdesk/core';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
@@ -329,9 +329,9 @@ export function buildServer(deps: {
   app.get<{ Querystring: { status?: TaskStatus } }>('/api/tasks', async (req) =>
     ({ tasks: store.listTaskViews(req.query?.status) }));
 
-  app.post<{ Body: { project: string | number; prompt: string; draft?: boolean } }>(
+  app.post<{ Body: { project: string | number; prompt: string; draft?: boolean; timeout_min?: number | null } }>(
     '/api/tasks', async (req, reply) => {
-      const { project, prompt, draft } = req.body ?? ({} as any);
+      const { project, prompt, draft, timeout_min } = req.body ?? ({} as any);
       if (!project || typeof prompt !== 'string' || !prompt.trim()) {
         return reply.code(400).send({ error: 'project 与 prompt 必填' });
       }
@@ -339,25 +339,35 @@ export function buildServer(deps: {
         ? store.getProject(project)
         : store.findProject(project);
       if (!p) return reply.code(404).send({ error: `项目不存在: ${project}` });
-      const task = store.addTask(p.id, prompt, { draft: !!draft });
+      let timeoutMin: number | null;
+      try { timeoutMin = validateTaskTimeout(timeout_min); }
+      catch (error) { return reply.code(400).send({error:(error as Error).message}); }
+      const task = store.addTask(p.id, prompt, { draft: !!draft, timeoutMin });
       if (!draft) scheduler.tickNow();
       return reply.code(201).send({ task: taskView(task) });
     },
   );
 
   /** 草稿操作：编辑 / 排序（移到某任务之前）/ 入队执行 */
-  app.post<{ Params: { id: string }; Body: { op: 'edit' | 'moveBefore' | 'enqueue'; prompt?: string; beforeId?: number } }>(
+  app.post<{ Params: { id: string }; Body: { op: 'edit' | 'moveBefore' | 'enqueue'; prompt?: string; beforeId?: number; timeout_min?: number | null } }>(
     '/api/tasks/:id/draft', async (req, reply) => {
       const t = store.getTask(Number(req.params.id));
       if (!t) return reply.code(404).send({ error: 'not found' });
       if (t.status !== 'draft') return reply.code(409).send({ error: '仅 draft 任务可操作' });
-      const { op, prompt, beforeId } = req.body ?? ({} as any);
+      const { op, prompt, beforeId, timeout_min } = req.body ?? ({} as any);
       if (op === 'edit') {
         if (typeof prompt !== 'string' || !prompt.trim()) return reply.code(400).send({ error: 'prompt 不能为空' });
-        store.updateTaskPrompt(t.id, prompt);
+        let timeoutMin: number | null | undefined;
+        try { if (timeout_min !== undefined) timeoutMin = validateTaskTimeout(timeout_min); }
+        catch (error) { return reply.code(400).send({error:(error as Error).message}); }
+        store.updateTaskPrompt(t.id, prompt, timeoutMin);
       } else if (op === 'moveBefore') {
         store.reorderDraft(t.id, beforeId ?? null);
       } else if (op === 'enqueue') {
+        if (timeout_min !== undefined) {
+          try { store.updateTaskPrompt(t.id,t.prompt,validateTaskTimeout(timeout_min)); }
+          catch(error){return reply.code(400).send({error:(error as Error).message});}
+        }
         store.setTaskStatus(t.id, 'queued');
         scheduler.tickNow();
       } else {

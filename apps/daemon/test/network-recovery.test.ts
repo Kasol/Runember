@@ -64,7 +64,7 @@ test('primary routing failure outranks shutdown telemetry and legacy auth classi
 
 test('connection watcher alerts once after sustained retries, preserves warning across restart and recovers on progress', () => {
   let now = 0; const changes: any[] = []; const notifications: string[] = [];
-  const options = { now: () => now, changed: (s: any) => changes.push(s), notify: (kind: string) => notifications.push(kind) };
+  const options = { now: () => now, inactivityAfterMs: 1e9, changed: (s: any) => changes.push(s), notify: (kind: string) => notifications.push(kind) };
   const watch = new ConnectionWatch(options);
   for(const text of ['codex_models_manager: request timed out','MCP connection failed','analytics connection failed'])watch.stderr(text);
   now = 600000; watch.tick(); assert.equal(notifications.length, 0); // A long tool is not a network failure.
@@ -78,11 +78,11 @@ test('connection watcher alerts once after sustained retries, preserves warning 
   now += 600000; recovered.tick(); assert.equal(notifications.length, 1);
   recovered.progress(); recovered.progress(); assert.deepEqual(notifications, ['run.connection_warning', 'run.connection_recovered']);
   assert.equal(changes.at(-1).state, 'recovered');
-  recovered.error(routing); now += 300000; recovered.tick(); assert.equal(notifications.length, 2);
+  recovered.error(routing); now += 300000; recovered.tick(); assert.equal(notifications.length, 3);
   const current = { ...fakeRun(1), status: 'running' as const, exit_code: undefined, connection: changes.at(-1) };
   const task: Task = { id: 1, project_id: 1, prompt: '', status: 'running', created_at: '' };
-  assert.match(taskStateLabel(taskView(task, current)), /运行中.*连接重试中/);
-  assert.equal(runDetails(current).stage, '连接重试中');
+  assert.match(taskStateLabel(taskView(task, current)), /运行中.*连接超时/);
+  assert.equal(runDetails(current).stage, '连接超时');
 });
 
 test('proxy settings validate, persist, protect local access and affect next-run and offline diagnostics only', async t => {
@@ -146,11 +146,11 @@ test('status, continuation and connection notifications explain repeat failures 
   const resume=await applyTaskAction(store,scheduler,{type:'resume',taskId:task.id,feedback:'raw feedback'},'dingtalk');assert.equal(resume.ok,true);assert.match(resume.message,/连续 3 轮/);assert.equal(store.getTask(task.id)?.pending_feedback,'raw feedback');
   const connection={state:'retrying' as const,since:'2026-11-19T01:00:00Z',lastProgressAt:'2026-11-19T00:59:00Z',reason:'Agent 网络连接错误',warnedAt:'2026-11-19T01:02:00Z'};
   const event:NotifyEvent={kind:'run.connection_warning',runId:3,task,project,connection};
-  const card=buildEventMarkdown(event,'');assert.match(card.title,/连接重试中/);assert.match(card.text,/执行器仍在运行/);
+  const card=buildEventMarkdown(event,'');assert.match(card.title,/运行中.*连接超时/);assert.match(card.text,/执行器仍在运行/);
   assert.doesNotMatch(card.title,/已结束|等待确认/);
   assert.match(buildEventMarkdown({...event,kind:'run.connection_recovered'},'').title,/恢复活动/);
-  assert.match(buildEventMarkdown(event,'',undefined,'en').title,/Reconnecting/);
-  assert.match(runDetailsMarkdown({...runDetails(fakeRun(3)),connection},false),/停止前的连接重试/);
+  assert.match(buildEventMarkdown(event,'',undefined,'en').title,/Running.*Connection timed out/);
+  assert.match(runDetailsMarkdown({...runDetails(fakeRun(3)),connection},false),/停止前的活动记录/);
 });
 
 test('connection notifications follow failed subscriptions, deduplicate per Run and never publish a final report', async t => {
@@ -163,6 +163,6 @@ test('connection notifications follow failed subscriptions, deduplicate per Run 
   const event:NotifyEvent={kind:'run.connection_warning',runId:1,task,project,connection};
   const notifier=new DingTalkAppNotifier('id','secret','',['failed'],{conversationId:'fixture'},async()=>{reports++;return 'https://invalid.test/report'},()=> 'en');
   await notifier.notify(event);await notifier.notify(event);await notifier.notify({...event,kind:'run.connection_recovered'});await notifier.notify({...event,runId:2});
-  assert.equal(texts.length,3);assert.equal(reports,0);assert.match(texts[0]!,/Reconnecting/);assert.ok(!texts[0]!.includes('Agent 连接错误'));
+  assert.equal(texts.length,3);assert.equal(reports,0);assert.match(texts[0]!,/Connection timed out/);assert.ok(!texts[0]!.includes('Agent 连接错误'));
   await new DingTalkAppNotifier('id','secret','',['succeeded'],{conversationId:'fixture'}).notify({...event,runId:3});assert.equal(texts.length,3);
 });

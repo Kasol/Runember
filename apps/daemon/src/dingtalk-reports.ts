@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { describeActivity, runDetails, taskStateLabel, taskView, type NotifyEvent, type Run, type UiLanguage } from '@agentdesk/core';
+import { describeActivity, runDetails, taskRunStateLabel, taskView, type NotifyEvent, type Run, type UiLanguage } from '@agentdesk/core';
 import type { DingTalkReportConfig } from './config.js';
 import { runDetailsMarkdown } from './dingtalk-markdown.js';
 import type { Store } from './store.js';
@@ -161,7 +161,7 @@ export class DingTalkReports {
     const fileChanges = details.filesChanged ?? [];
     const sections = [
       `# ${t('任务', 'Task')} #${event.task.id} · Run #${run.id} · ${event.project.name}`,
-      taskStateLabel(state, language),
+      taskRunStateLabel(state, details, language),
       `## ${t('运行详情', 'Run details')}`,
       run.started_at ? `${t('开始时间', 'Started')} · ${clock(run.started_at)}` : '',
       run.ended_at ? `${t('结算时间', 'Ended')} · ${clock(run.ended_at)}` : '',

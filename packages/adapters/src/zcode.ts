@@ -22,7 +22,7 @@ export class ZcodeAdapter implements AgentAdapter {
       const base = { sessionId, ...(model && { model }) };
       if (event.type === 'turn.started') return { ...base, type: 'activity', activity: { key: event.turnId ?? 'turn', kind: 'turn', phase: 'started' } };
       if (event.type === 'turn.completed' || event.type === 'result') return {
-        ...base, type: 'agent_message', text: typeof (p.response ?? event.response) === 'string' ? p.response ?? event.response : '',
+        ...base, type: 'agent_message', final: true, text: typeof (p.response ?? event.response) === 'string' ? p.response ?? event.response : '',
       };
       if (event.type === 'turn.failed') return { ...base, type: 'error', text: p.error?.message ?? p.message ?? 'ZCode turn failed' };
       if (event.type === 'userInput.requested') return { ...base, type: 'input_requested', text: p.prompt };

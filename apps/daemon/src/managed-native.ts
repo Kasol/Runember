@@ -147,7 +147,7 @@ public static class AgentdeskJob {
           if (state == 0) break;
           Check(state == 258, "WaitForSingleObject");
           cancelled = File.Exists(cancel);
-          timedOut = !cancelled && timer.ElapsedMilliseconds >= timeout;
+          timedOut = !cancelled && timeout > 0 && timer.ElapsedMilliseconds >= timeout;
           if ((!cancelled && !timedOut) || WaitForSingleObject(child.Process, 0) == 0) {
             cancelled = timedOut = false;
             continue;
@@ -219,7 +219,7 @@ const timer = setInterval(() => {
     finish({ exitCode: exit.code });
     return;
   }
-  if (!reason && (requested() || Date.now() - start >= timeout)) {
+  if (!reason && (requested() || timeout > 0 && Date.now() - start >= timeout)) {
     const stop = requested() ? 'cancelled' : 'timedOut';
     try { process.kill(-child.pid, 'SIGKILL'); reason = stop; }
     catch (error) { if (error.code !== 'ESRCH') console.error(error.message); }

@@ -71,6 +71,8 @@ export class CodexAdapter implements AgentAdapter {
           return { type: 'session', sessionId: typeof msg.thread_id === 'string' ? msg.thread_id : undefined };
         case 'turn.started':
           return { type: 'activity', activity: { key: 'turn', kind: 'turn', phase: 'started' } };
+        case 'turn.completed':
+          return { type: 'activity', final: true, activity: { key: 'turn', kind: 'turn', phase: 'completed' } };
         case 'item.started':
         case 'item.completed': {
           const item = msg.item as CodexItem | undefined;
@@ -104,7 +106,7 @@ function parseFinalResponse(text: string): AdapterEvent | undefined {
     const response = JSON.parse(text) as { answer?: unknown; input_request?: unknown } | null;
     if (response && typeof response.answer === 'string'
         && (response.input_request === null || typeof response.input_request === 'string')) {
-      return { type: 'agent_message', text: response.answer, inputRequest: response.input_request?.trim() || undefined };
+      return { type: 'agent_message', text: response.answer, final: true, inputRequest: response.input_request?.trim() || undefined };
     }
   } catch { /* 中间消息和旧回复仍可作为纯文本读取 */ }
 }

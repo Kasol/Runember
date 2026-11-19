@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, client, setApiToken, taskStatusMeta, type Project, type Task, type ProjectFolder } from './api';
-import { agentLabel, readRunSummary, runStage, runTiming, reasoningLabel, failureHint, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
+import { taskDescriptions, agentLabel, readRunSummary, runStage, runTiming, reasoningLabel, failureHint, taskRunStateLabel, runReplyPresentation, runLimitLabel, validateTaskTimeout, MAX_TASK_TIMEOUT_MIN, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 import { ProjectFolderPicker } from './ProjectFolderPicker';
 import { RunLogViewer } from './RunLogViewer';
@@ -98,7 +98,7 @@ export default function App() {
     } catch (e: any) { alert(e?.message ?? '操作失败'); }
   };
 
-  const draftOp = async (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) => {
+  const draftOp = async (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number; timeout_min?: number | null }) => {
     try {
       await client.draftOp(id, op, extra);
       await refresh();
@@ -417,12 +417,13 @@ function Card(props: {
 function DraftCard(props: {
   task: Task; index: number; total: number; project?: string;
   onOpen: () => void;
-  onOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) => Promise<void>;
+  onOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number; timeout_min?: number | null }) => Promise<void>;
   onMove: (id: number, dir: -1 | 1) => void;
   onDelete: (id: number) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState('');
+  const [timeout, setTimeoutValue] = useState('');
   const t = props.task;
 
   return (
@@ -435,13 +436,17 @@ function DraftCard(props: {
       {editing ? (
         <>
           <textarea className="draft-edit" value={text} onChange={e => setText(e.target.value)} rows={3} />
+          <Labeled label="单轮最长运行时间（分钟，选填）"><input type="number" min="1" max={MAX_TASK_TIMEOUT_MIN} placeholder="不限时" value={timeout} onChange={e=>setTimeoutValue(e.target.value)} /></Labeled>
           <div className="card-actions">
-            <button className="primary" onClick={() => { void props.onOp(t.id, 'edit', { prompt: text }); setEditing(false); }}>保存</button>
+            <button className="primary" onClick={() => {
+              try { const timeout_min=validateTaskTimeout(timeout===''?null:Number(timeout));void props.onOp(t.id,'edit',{prompt:text,timeout_min});setEditing(false); }
+              catch(error){alert((error as Error).message)}
+            }}>保存</button>
             <button onClick={() => setEditing(false)}>取消</button>
           </div>
         </>
       ) : (
-        <div className="prompt" onDoubleClick={() => { setEditing(true); setText(t.prompt); }} title="双击编辑">
+        <div className="prompt" onDoubleClick={() => { setEditing(true); setText(t.prompt); setTimeoutValue(t.timeout_min?String(t.timeout_min):''); }} title="双击编辑">
           {t.prompt}
         </div>
       )}
@@ -449,7 +454,7 @@ function DraftCard(props: {
         <button className="primary" onClick={() => void props.onOp(t.id, 'enqueue')}>▶ 执行</button>
         <button title="上移" disabled={props.index === 0} onClick={() => props.onMove(t.id, -1)}>↑</button>
         <button title="下移" disabled={props.index === props.total - 1} onClick={() => props.onMove(t.id, 1)}>↓</button>
-        <button title="编辑" onClick={() => { setEditing(true); setText(t.prompt); }}>✎</button>
+        <button title="编辑" onClick={() => { setEditing(true); setText(t.prompt);setTimeoutValue(t.timeout_min?String(t.timeout_min):''); }}>✎</button>
         <button title="删除" onClick={() => void props.onDelete(t.id)}>🗑</button>
       </div>
     </div>
@@ -491,15 +496,18 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
   const runs = data?.runs ?? [];
   const actions = data?.actions;
   const details = data?.details;
+  const response = details && runReplyPresentation(details);
   const logRun = runs.find(run => run.id === selectedRunId) ?? runs.at(-1);
   const files = readRunSummary(runs.at(-1))?.filesChanged;
 
   return (
-    <Modal title={`#${props.taskId}${task ? ` · ${taskStatusMeta(task).label}` : ''}`} onClose={props.onClose} layout="detail">
+    <Modal title={`#${props.taskId}${task ? ` · ${taskRunStateLabel(task, details)}` : ''}`} onClose={props.onClose} layout="detail">
       {error && <p role="alert">{error}</p>}
       {!task && !error && <p>正在读取任务…</p>}
       {task?.confirmation && <dl className="confirmation"><dt>请确认</dt><dd>{task.confirmation}</dd></dl>}
       {details ? <p className="run-facts">{runTiming(details)}</p> : data?.agentId && <p className="run-facts">Agent · {data.agentId}</p>}
+      {details ? <p className="dim">{runLimitLabel(details.limits)}</p> : task && <p className="dim">{runLimitLabel({timeoutMin:task.timeout_min??null})}</p>}
+      {response?.notice && <p className="advice" role="status">{response.notice}</p>}
       {(details || task) && !details?.reasoningEffort && <p className="dim">{reasoningLabel(details ? details.reasoningEffort : task?.reasoning_effort)}</p>}
       {details?.network && <p className="dim">启动时 HTTPS 代理：{details.network.httpsProxy || '未指定'}</p>}
       {details?.cancellationRequestedAt && <dl className="run-details">
@@ -510,10 +518,10 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
       </dl>}
       {details?.diagnostic && <dl className="run-details"><dt>运行说明</dt><dd>{details.diagnostic}</dd></dl>}
       {details?.failure && !data?.repeatedFailure && <p className="dim">{failureHint(details.failure)}</p>}
-      {details?.connection?.state === 'retrying' && task?.state === 'running' && <div className="banner" role="status">
-        <strong>连接重试中</strong><p>{details.connection.reason}</p>
-        <p>开始重连：{new Date(details.connection.since).toLocaleString()} · 最后有效活动：{new Date(details.connection.lastProgressAt).toLocaleString()}</p>
-        <p>执行器仍在运行。请检查环境设置中的代理和连接，可主动取消。</p>
+      {(details?.connection?.state === 'retrying' || details?.connection?.state === 'inactive') && task?.state === 'running' && <div className="advice" role="status">
+        <strong>{details.connection.state==='inactive'?'长时间无可见活动':details.connection.warnedAt?'连接超时':'连接重试中'}</strong><p>{details.connection.reason}</p>
+        <p>观察起点：{new Date(details.connection.since).toLocaleString()} · 最近可见活动：{new Date(details.connection.lastVisibleActivityAt ?? details.connection.lastProgressAt).toLocaleString()}</p>
+        <p>执行器仍在运行。{details.connection.state==='inactive'?'长耗时工具可能暂时没有新活动，可查看最近活动或日志。':'请检查环境设置中的代理和连接。'}可主动取消。</p>
       </div>}
       {data?.repeatedFailure && <div className="advice" role="note">💡 连续 {data.repeatedFailure.count} 轮出现同类故障。{data.repeatedFailure.hint}仍可主动续跑。</div>}
       {data?.reportDeliveries?.filter(job => job.state !== 'complete').map((job, index) => <div className="advice" role="status" key={`report-${job.runId}-${index}`}>
@@ -534,10 +542,10 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
       )}
       {merge?.verified && <p className="dim">已验证提交 <code>{merge.verified.head}</code></p>}
 
-      {details?.summary && (
+      {details && response && (
         <div className="summary">
-          <b>Agent 最终答复</b>
-          <p>{details.summary}</p>
+          <b>{response.title}</b>
+          {details.summary && (details.responseKind === 'last_message' ? <blockquote>{details.summary}</blockquote> : <p>{details.summary}</p>)}
           {!!files?.length && <p className="dim">📝 改动 {files.length} 个文件</p>}
         </div>
       )}
@@ -571,7 +579,7 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
           </div>
         </div>
       )}
-      {task && <p className="prompt-full">{task.prompt}</p>}
+      {task && <div className="prompt-full"><b>原始描述</b><p>{taskDescriptions(task, runs).original}</p><b>本轮描述</b><p>{taskDescriptions(task, runs).current ?? '未记录'}</p></div>}
 
       {runs.length > 0 && <div className="runs">
         <b>Run 历史</b>
@@ -593,6 +601,7 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
 function NewTask(props: { project?: Project; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [timeout, setTimeoutValue] = useState('');
   const [busy, setBusy] = useState(false);
 
   const project = props.project;
@@ -601,8 +610,10 @@ function NewTask(props: { project?: Project; onCreated: () => void }) {
     if (!project || !prompt.trim() || busy) return;
     setBusy(true);
     try {
-      await client.createTask(project.id, prompt, draft);
+      const timeoutMin=validateTaskTimeout(timeout===''?null:Number(timeout));
+      await client.createTask(project.id, prompt, draft, timeoutMin);
       setPrompt('');
+      setTimeoutValue('');
       setOpen(false);
       props.onCreated();
     } catch (e: any) { alert(e?.message ?? '派发失败'); }
@@ -620,6 +631,9 @@ function NewTask(props: { project?: Project; onCreated: () => void }) {
           placeholder="描述要执行的任务"
           value={prompt} onChange={e => setPrompt(e.target.value)} rows={4}
         />
+      </Labeled>
+      <Labeled label="单轮最长运行时间（分钟，选填）">
+        <input type="number" min="1" max={MAX_TASK_TIMEOUT_MIN} placeholder="不限时" value={timeout} onChange={e=>setTimeoutValue(e.target.value)} />
       </Labeled>
       <div className="row">
         <button className="primary" disabled={busy || !project || !prompt.trim()} onClick={() => void submit(false)}>立即执行</button>

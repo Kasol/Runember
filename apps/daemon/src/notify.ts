@@ -45,7 +45,7 @@ export class ConsoleNotifier extends DedupedNotifier {
     const t = `任务#${event.task.id}[${event.project.name}]`;
     const state = event.kind === 'run.started' || event.kind.startsWith('run.connection_') ? 'running' : event.kind === 'run.cancelled' ? 'cancelled'
       : event.details?.confirmation ? 'awaiting_confirmation' : 'ended';
-    const detail = event.kind === 'run.connection_warning' ? '连接重试超过 2 分钟' : event.kind === 'run.connection_recovered' ? 'Agent 恢复有效活动'
+    const detail = event.kind === 'run.connection_warning' ? event.connection.state === 'inactive' ? '长时间无可见活动，执行器仍在运行' : '连接重试超过 2 分钟，执行器仍在运行' : event.kind === 'run.connection_recovered' ? 'Agent 恢复有效活动'
       : event.details?.confirmation ?? event.details?.stage ?? '';
     console.log(`${TASK_STATE_LABELS[state]} ${t}${detail ? ' · ' + detail : ''}`);
   }

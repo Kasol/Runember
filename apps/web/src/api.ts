@@ -63,11 +63,11 @@ export const client = {
   runLog: (id: number, before?: number) => api<{ text: string; before: number | null }>(
     'GET', `/api/runs/${id}/log${before === undefined ? '' : `?before=${before}`}`,
   ),
-  createTask: (project: string | number, prompt: string, draft = false) =>
-    api<{ task: TaskView }>('POST', '/api/tasks', { project, prompt, draft }),
+  createTask: (project: string | number, prompt: string, draft = false, timeoutMin?: number | null) =>
+    api<{ task: TaskView }>('POST', '/api/tasks', { project, prompt, draft, timeout_min: timeoutMin }),
   drafts: () => api<{ drafts: TaskView[] }>('GET', '/api/drafts'),
   projectFolders: (path?: string) => api<ProjectFolderListing>('POST', '/api/project-folders', { path }),
-  draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
+  draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number; timeout_min?: number | null }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
   reasoningOptions: (agent: string, model: string) => api<{ model?: string; options: ReasoningOption[] }>('GET', `/api/agents/${encodeURIComponent(agent)}/reasoning?model=${encodeURIComponent(model)}`),
   createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability', model?: string | null, reasoning_effort?: string | null) =>

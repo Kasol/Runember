@@ -30,7 +30,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
       accept: event => this.events.includes(event.kind.replace('run.', '')),
       result: (event, lang, url, failed) => this.sendResult(event, lang, url, failed),
       link: async (event, lang, url) => {
-        const md = reportReadyMarkdown(event, lang); await this.post(md.title, md.text, url, lang);
+        const md = reportReadyMarkdown(event, lang); await this.ordered(event.runId,()=>this.post(md.title, md.text, url, lang));
         console.log(`[notify:dingtalk-app] 钉钉已接受报告链接 task=${event.task.id} run=${event.runId}`);
       },
     });
@@ -87,7 +87,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
   private async sendResult(e: NotifyEvent, language: UiLanguage, reportUrl?: string, reportFailed = false): Promise<void> {
     const md = buildEventMarkdown(e, this.publicUrl, reportUrl, language, reportFailed);
     if (md) {
-      await this.post(md.title, md.text, md.detailUrl, language);
+      await this.ordered(e.runId,()=>this.post(md.title, md.text, md.detailUrl, language));
       console.log(`[notify:dingtalk-app] 钉钉已接受通知 task=${e.task.id} run=${e.runId} event=${e.kind}`);
     }
   }

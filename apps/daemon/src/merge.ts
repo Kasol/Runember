@@ -89,10 +89,10 @@ function runTests(cwd: string, test: string, timeout: number, log: (line: string
     let timedOut = false;
     child.stdout.on('data', chunk => log(String(chunk)));
     child.stderr.on('data', chunk => log(String(chunk)));
-    const timer = setTimeout(() => {
+    const timer = timeout > 0 ? setTimeout(() => {
       timedOut = true;
       killProcessTree(child);
-    }, timeout);
+    }, timeout) : undefined;
     child.on('error', error => {
       clearTimeout(timer);
       reject(error);

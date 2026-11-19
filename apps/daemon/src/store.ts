@@ -5,7 +5,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { taskView, type Task, type TaskStatus, type TaskView, type Run, type Project, type RunActivity } from '@agentdesk/core';
+import { taskView, validateTaskTimeout, type Task, type TaskStatus, type TaskView, type Run, type Project, type RunActivity } from '@agentdesk/core';
 import type { MergePlan, MergeState } from './merge.js';
 
 export class Store {
@@ -86,9 +86,10 @@ export class Store {
       CREATE INDEX IF NOT EXISTS notification_deliveries_run ON notification_deliveries(json_extract(payload, '$.runId'));
     `);
     const runCols = this.db.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>;
-    for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json', 'connection_json', 'network_json']) {
+    for (const field of ['prompt', 'checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json', 'connection_json', 'network_json', 'limits_json']) {
       if (!runCols.some(col => col.name === field)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${field} TEXT`);
     }
+    if (!(this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{name:string}>).some(col=>col.name==='timeout_min')) this.db.exec('ALTER TABLE tasks ADD COLUMN timeout_min INTEGER');
     for (const [table, fields] of [['projects', ['model', 'reasoning_effort']], ['tasks', ['agent_id', 'model', 'execution', 'reasoning_effort']], ['runs', ['agent_id', 'model', 'reasoning_effort']]] as const) {
       const names = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
       for (const field of fields) if (!names.some(column => column.name === field)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${field} TEXT`);
@@ -175,7 +176,8 @@ export class Store {
 
   // ── tasks ──
   /** draft=true 时任务以 draft 状态落库（不参与调度），draft_order 用于草稿排序 */
-  addTask(projectId: number, prompt: string, opts?: { draft?: boolean }): Task {
+  addTask(projectId: number, prompt: string, opts?: { draft?: boolean; timeoutMin?: number | null }): Task {
+    const timeoutMin = validateTaskTimeout(opts?.timeoutMin);
     const project = this.getProject(projectId)!;
     const status = opts?.draft ? 'draft' : 'queued';
     let draftOrder: number | null = null;
@@ -186,8 +188,8 @@ export class Store {
       draftOrder = (row?.m ?? 0) + 1;
     }
     const r = this.db.prepare(
-      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution, reasoning_effort) VALUES (?,?,?,?,?,?,?,?,?)',
-    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability', project.reasoning_effort ?? null);
+      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution, reasoning_effort, timeout_min) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability', project.reasoning_effort ?? null, timeoutMin);
     return this.getTask(Number(r.lastInsertRowid))!;
   }
   addMergeTask(projectId: number, plan: MergePlan): Task {
@@ -245,8 +247,9 @@ export class Store {
     if (status !== 'draft') this.db.prepare('UPDATE tasks SET draft_order=NULL WHERE id=?').run(id);
   }
   /** 草稿操作：编辑提示词 / 移动顺序 */
-  updateTaskPrompt(id: number, prompt: string): void {
-    this.db.prepare('UPDATE tasks SET prompt=? WHERE id=?').run(prompt, id);
+  updateTaskPrompt(id: number, prompt: string, timeoutMin?: number | null): void {
+    if (timeoutMin === undefined) this.db.prepare('UPDATE tasks SET prompt=? WHERE id=?').run(prompt, id);
+    else this.db.prepare('UPDATE tasks SET prompt=?,timeout_min=? WHERE id=?').run(prompt, validateTaskTimeout(timeoutMin), id);
   }
   reorderDraft(id: number, beforeId: number | null): void {
     // 把 id 移到 beforeId 之前：重排剩余草稿的 draft_order
@@ -271,8 +274,8 @@ export class Store {
   // ── runs ──
   insertRun(taskId: number, kind: 'normal' | 'resume'): Run {
     const task = this.getTask(taskId)!;
-    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status, agent_id, model, reasoning_effort) VALUES (?,?,?,?,?,?)')
-      .run(taskId, kind, 'starting', task.agent_id ?? 'codex', task.model ?? null, task.reasoning_effort ?? null);
+    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status, agent_id, model, reasoning_effort, limits_json, prompt) VALUES (?,?,?,?,?,?,?,?)')
+      .run(taskId, kind, 'starting', task.agent_id ?? 'codex', task.model ?? null, task.reasoning_effort ?? null, JSON.stringify({timeoutMin:task.timeout_min ?? null}), task.pending_feedback ?? task.prompt);
     return this.getRun(Number(r.lastInsertRowid))!;
   }
   beginRun(taskId: number): Run | undefined {
@@ -329,10 +332,10 @@ export class Store {
     }, isMerge ? 'queued' : 'blocked');
   }
   private parseRun(row: (Run & {
-    worker_json?: string; cancellation_json?: string; execution_json?: string; recent_activity_json?: string; connection_json?: string; network_json?: string;
+    worker_json?: string; cancellation_json?: string; execution_json?: string; recent_activity_json?: string; connection_json?: string; network_json?: string; limits_json?: string;
   }) | undefined): Run | undefined {
     if (!row) return undefined;
-    const { worker_json, cancellation_json, execution_json, recent_activity_json, connection_json, network_json, ...run } = row;
+    const { worker_json, cancellation_json, execution_json, recent_activity_json, connection_json, network_json, limits_json, ...run } = row;
     return {
       ...run,
       worker: worker_json ? JSON.parse(worker_json) as Run['worker'] : undefined,
@@ -340,6 +343,7 @@ export class Store {
       execution: execution_json ? JSON.parse(execution_json) as Run['execution'] : undefined,
       connection: connection_json ? JSON.parse(connection_json) as Run['connection'] : undefined,
       network: network_json ? JSON.parse(network_json) as Run['network'] : undefined,
+      limits: limits_json ? JSON.parse(limits_json) as Run['limits'] : undefined,
     };
   }
   getRun(id: number): Run | undefined {

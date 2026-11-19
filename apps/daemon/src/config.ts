@@ -22,7 +22,7 @@ export interface DingTalkReportConfig {
 
 export interface AppConfig {
   server: { host: string; port: number; token: string; publicUrl: string };
-  scheduler: { concurrency: number; tickMs: number; taskTimeoutMin: number };
+  scheduler: { concurrency: number; tickMs: number; /** Legacy setting, ignored for task execution. */ taskTimeoutMin: number; inactivityWarningMin: number };
   /** agent 配置是开放字典：注册表里有什么 id，这里就能配什么 */
   agents: Record<string, {
     image: string;
@@ -51,7 +51,7 @@ export interface DingTalkStreamConfig {
 
 const DEFAULTS: AppConfig = {
   server: { host: '127.0.0.1', port: 8787, token: '', publicUrl: '' },
-  scheduler: { concurrency: 1, tickMs: 5000, taskTimeoutMin: 30 },
+  scheduler: { concurrency: 1, tickMs: 5000, taskTimeoutMin: 0, inactivityWarningMin: 10 },
   agents: {
     codex: {
       image: 'agentdesk/runner-codex:m0',
@@ -147,11 +147,12 @@ export function loadConfig(overrides?: { configPath?: string; dataDir?: string; 
   if (!cfg.proxy.httpsProxy && process.env.HTTPS_PROXY) cfg.proxy.httpsProxy = process.env.HTTPS_PROXY;
   if (!cfg.proxy.httpProxy && process.env.HTTP_PROXY) cfg.proxy.httpProxy = process.env.HTTP_PROXY;
 
-  for (const key of ['concurrency', 'tickMs', 'taskTimeoutMin'] as const) {
+  for (const key of ['concurrency', 'tickMs', 'inactivityWarningMin'] as const) {
     if (!Number.isSafeInteger(cfg.scheduler[key]) || cfg.scheduler[key] < 1) {
       throw new Error(`scheduler.${key} 必须为正整数`);
     }
   }
+  if (!Number.isSafeInteger(cfg.scheduler.taskTimeoutMin) || cfg.scheduler.taskTimeoutMin < 0) throw new Error('旧配置 scheduler.taskTimeoutMin 必须为非负整数');
   const report = cfg.notify.dingtalkReport;
   if (report?.executable && (typeof report.executable !== 'string'
     || typeof report.configDir !== 'string' || !report.configDir.trim())) {

@@ -1,5 +1,5 @@
 /** HTTP API 和钉钉共用的任务动作。 */
-import { describeActivity, runDetails, taskStateLabel, taskView, repeatedRunFailure } from '@agentdesk/core';
+import { taskDescriptions, describeActivity, runDetails, taskStateLabel, taskRunStateLabel, taskView, repeatedRunFailure, validateTaskTimeout, runLimitLabel } from '@agentdesk/core';
 import type { FeedbackAction, RunActivity, Task, TaskActions, UiLanguage } from '@agentdesk/core';
 import type { Store } from './store.js';
 import type { Scheduler } from './scheduler.js';
@@ -29,24 +29,26 @@ const HELP_ZH = [
   '### 🤖 Runember 指令',
   '- `项目` · 查看可派单的项目',
   '- `开始 [项目] <描述>` / `开始 编号` · 派发任务或启动草稿',
-  '- `状态 [编号]` · 看队列，带编号时附最近 10 条活动',
+  '- `状态 [编号]` · 看队列或单个任务详情',
   '- `继续 55 [说明]` · 继续任务，有会话时恢复原会话',
   '- `取消 55` · 取消任务，运行中的执行器停止后结算',
   '- `帮助` · 显示指令',
   '',
   '只有一个项目时可以省略项目名。任务编号可以写 `55` 或 `#55`，也可以写 `55 继续` 或 `55 取消`。',
+  '默认不限时；在描述前加 `--timeout-min 120` 可指定单轮时限（分钟）。',
 ].join('  \n');
 
 const HELP_EN = [
   '### 🤖 Runember commands',
   '- `projects` · List available projects',
   '- `start [project] <description>` / `start <number>` · Create a task or start a draft',
-  '- `status [number]` · Show the queue or one task with its last 10 activities',
+  '- `status [number]` · Show the queue or task details',
   '- `continue 55 [feedback]` · Continue a task using its existing session when available',
   '- `cancel 55` · Cancel a task, settling after its executor stops',
   '- `help` · Show commands',
   '',
   'With one project, its name is optional. Use either 55 or #55 for a task number.',
+  'Unlimited by default. Prefix the description with `--timeout-min 120` to set a run time limit in minutes.',
 ].join('  \n');
 
 export function formatActivity(activities: RunActivity[], language: UiLanguage = 'zh-CN'): string {
@@ -139,23 +141,22 @@ export async function applyTaskAction(
     const details = run && runDetails(run, task.agent_id ?? 'codex', task.partial_remaining);
     const merge = store.getMerge(id);
     const actions = availableTaskActions(store, task, origin);
-    const repeated = repeatedRunFailure(store.runsOfTask(id));
+    const runs = store.runsOfTask(id);
+    const repeated = repeatedRunFailure(runs);
+    const descriptions = taskDescriptions(task, runs);
     return reply([
       t(`### 📋 任务 #${id} · ${projectName(task.project_id)}`, `### 📋 Task #${id} · ${projectName(task.project_id)}`),
-      `**${stateLabel(view)}**`,
+      `**${taskRunStateLabel(view, details, language)}**`,
       !run ? `Agent · ${task.agent_id ?? 'codex'}${task.model ? ' / ' + task.model : ''}` : '',
       details ? runDetailsMarkdown(details, view.state === 'awaiting_confirmation', language) : '',
       repeated ? t(`💡 连续 ${repeated.count} 轮出现同类故障，可参考上方处理建议，仍可主动续跑。`, `💡 ${repeated.count} consecutive runs encountered the same failure. Review the suggested action above; you can still continue manually.`) : '',
-      origin === 'dingtalk' && run ? [
-        t('**最近活动（最多 10 条）**', '**Recent activity (up to 10)**'),
-        formatActivity(store.recentRunActivities(run.id), language),
-      ].join('\n\n') : '',
-      `**${t('任务描述', 'Task description')}**\n\n${task.prompt}`,
+      `**${t('原始描述', 'Original description')}**\n\n${descriptions.original}`,
+      `**${t('本轮描述', 'Current run description')}**\n\n${descriptions.current ?? t('未记录', 'Not recorded')}`,
       merge?.state.repo && merge.state.pr ? `[${t('查看 PR', 'View PR')}](https://github.com/${merge.state.repo}/pull/${merge.state.pr})` : '',
       actions.resume ? `${actions.resume === 'session' ? t('续跑原会话', 'Resume the session') : t('以新会话继续', 'Continue in a new session')} \`${continueCommand} ${id} [${t('说明', 'feedback')}]\`` : '',
       origin !== 'dingtalk' && actions.retry && !merge ? `重试（新会话） \`重试 ${id}\`` : '',
       actions.cancel && view.state === 'running' && !view.stopping ? `${t('停止任务', 'Stop the task')} \`${cancelCommand} ${id}\`` : '',
-      run?.log_path ? `**${t('完整日志', 'Full log')}**\n\n${run.log_path}` : '',
+      view.state !== 'running' && run?.log_path ? `**${t('完整日志', 'Full log')}**\n\n${run.log_path}` : '',
     ].filter(Boolean).join('\n\n'));
   }
 
@@ -176,12 +177,20 @@ export async function applyTaskAction(
     }
     if (!prompt) return fail(t(`请输入任务描述 \`${command} ${project.name} <描述>\`。`,
       `Enter a description: \`start ${project.name} <description>\`.`));
-    const task = store.addTask(project.id, prompt, { draft });
+    let timeoutMin: number | null;
+    const limit = prompt.match(/^--timeout-min(?:=|\s+)(\S+)(?:\s+([\s\S]*))?$/i);
+    if (/^--timeout-min(?:=|\s|$)/i.test(prompt) && !limit) return fail(t('请填写执行时限（分钟）。','Enter the run time limit in minutes.'));
+    if (limit) prompt = limit[2] ?? '';
+    try { timeoutMin=validateTaskTimeout(limit ? Number(limit[1]) : action.timeoutMin); }
+    catch(error){return fail(t((error as Error).message,'Run time limit must be a positive whole number of minutes; omit it or use 0 for unlimited.'));}
+    if (!prompt.trim()) return fail(t('请输入任务描述。','Enter a task description.'));
+    const task = store.addTask(project.id, prompt, { draft, timeoutMin });
     if (!draft) scheduler.tickNow();
     return reply([
       `### ${draft ? '📝 草稿已创建' : t('⏳ 任务已入队', '⏳ Task queued')}`,
       `**#${task.id}** · ${project.name}`,
       `Agent · ${task.agent_id}${task.model ? ' / ' + task.model : ''}`,
+      runLimitLabel({timeoutMin}, language),
       prompt,
       draft ? `启动草稿 \`开始 ${task.id}\`` : `${t('查看状态', 'Check status')} \`${statusCommand} ${task.id}\``,
     ].join('\n\n'));
@@ -206,11 +215,17 @@ export async function applyTaskAction(
           : t(`任务 #${id} 当前为${statusLabel}。只有草稿可以用「开始 <编号>」启动。`,
             `Task #${id} is ${statusLabel}. Use “start <number>” for drafts.`));
       }
-      const extra = action.prompt?.trim();
-      if (extra && extra !== task.prompt) store.updateTaskPrompt(id, task.prompt + '\n' + extra);
+      let extra = action.prompt?.trim();
+      const limit = extra?.match(/^--timeout-min(?:=|\s+)(\S+)(?:\s+([\s\S]*))?$/i);
+      if (extra && /^--timeout-min(?:=|\s|$)/i.test(extra) && !limit) return fail(t('请填写执行时限（分钟）。','Enter the run time limit in minutes.'));
+      let timeoutMin: number | null | undefined;
+      try { if (limit || action.timeoutMin !== undefined) timeoutMin=validateTaskTimeout(limit?Number(limit[1]):action.timeoutMin); }
+      catch(error){return fail(t((error as Error).message,'Enter a positive whole number of minutes, or 0 for unlimited.'));}
+      if (limit) extra=limit[2]?.trim();
+      if ((extra && extra !== task.prompt) || timeoutMin !== undefined) store.updateTaskPrompt(id, extra && extra !== task.prompt ? task.prompt+'\n'+extra : task.prompt, timeoutMin);
       store.setTaskStatus(id, 'queued');
       scheduler.tickNow();
-      return reply(t(`⏳ 草稿 ${title} 已入队。查看 \`状态 ${id}\`。`, `⏳ Draft ${title} queued. Use \`status ${id}\`.`));
+      return reply(t(`⏳ 草稿 ${title} 已入队。查看 \`状态 ${id}\`。`, `⏳ Draft ${title} queued. Use \`status ${id}\`.`)+'\n\n'+runLimitLabel({timeoutMin:timeoutMin===undefined?task.timeout_min??null:timeoutMin},language));
     }
     case 'resume': {
       if (merge) return fail(t('自动化合并任务请通过 CLI retry 继续。', 'Continue merge tasks with CLI retry.'));

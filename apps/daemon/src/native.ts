@@ -102,6 +102,16 @@ export interface NativeSpawnOpts {
   onStdoutLine?: (line: string) => void;
   onStderrLine?: (line: string) => void;
   logFile?: string;
+  /** Optional bounded diagnostic tail; stream callbacks always receive complete lines. */
+  captureTail?: number;
+}
+
+export function outputTailLine(line: string): string {
+  return line.length <= 16_384 ? line : line.slice(0,8192)+'\n…\n'+line.slice(-8192);
+}
+export function retainOutput(target: string[], line: string, tail?: number): void {
+  target.push(tail ? outputTailLine(line) : line);
+  if (tail && target.length > tail) target.splice(0,target.length-tail);
 }
 
 /** 宿主侧执行（与 DockerBackend 的 runInRunner 语义对齐：超时强杀、收集输出） */
@@ -131,7 +141,7 @@ export function runNative(opts: NativeSpawnOpts, onProc?: (p: ChildProcess) => v
       const decoder = new StringDecoder('utf8');
       const emit = (line: string) => {
         if (!line.trim()) return;
-        target.push(line);
+        retainOutput(target,line,opts.captureTail);
         onLine?.(line);
       };
       source?.on('data', (chunk: Buffer) => {

@@ -119,7 +119,7 @@ test('notification sends the detail button after publishing and still delivers i
   await english.notify({ ...event, runId: 3 });
   const englishPayload = JSON.parse(requests.at(-1)!.body.msgParam as string);
   assert.ok(englishPayload.text.endsWith('[📄 View details](' + url + ')'));
-  assert.equal(englishPayload.title, '⏹ Ended');
+  assert.equal(englishPayload.title, '⏹ Ended · Stopped');
   assert.doesNotMatch(englishPayload.text, /[\u4e00-\u9fff]/);
 });
 

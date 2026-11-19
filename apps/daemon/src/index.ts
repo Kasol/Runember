@@ -62,7 +62,8 @@ async function main(): Promise<void> {
 
   mkdirSync(join(cfg.logDir, 'runs'), { recursive: true });
   console.log(`Runember daemon 启动中…`);
-  console.log(`  dataDir=${cfg.dataDir}  并发=${cfg.scheduler.concurrency}  超时=${cfg.scheduler.taskTimeoutMin}min`);
+  console.log(`  dataDir=${cfg.dataDir}  并发=${cfg.scheduler.concurrency}  任务默认不限时，无可见活动提醒=${cfg.scheduler.inactivityWarningMin}min`);
+  if (cfg.scheduler.taskTimeoutMin) console.info('  旧的全局 taskTimeoutMin 不再限制任务；请在创建任务时指定单轮时限。');
   console.log(`  logDir=${cfg.logDir}`);
   if (cfg.proxy.httpsProxy || cfg.proxy.httpProxy) console.log('  已配置容器代理');
 

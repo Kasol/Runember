@@ -93,15 +93,19 @@ export interface Task {
   status: TaskStatus;
   /** resume 时携带的人工反馈；runner 据此决定是新会话还是续会话 */
   pending_feedback?: string;
+  /** Optional per-Run execution limit, in minutes. null/undefined means unlimited. */
+  timeout_min?: number | null;
   /** 部分完成时 agent 自报的未完成清单（非空 = partial；供人决定是否派后续任务） */
   partial_remaining?: string | null;
   created_at: string;
 }
 
 export interface RunConnection {
-  state: 'retrying' | 'recovered';
+  state: 'retrying' | 'inactive' | 'recovered';
+  source?: 'connection' | 'inactivity';
   since: string;
   lastProgressAt: string;
+  lastVisibleActivityAt?: string;
   reason: string;
   warnedAt?: string;
   recoveredAt?: string;
@@ -129,11 +133,15 @@ export function repeatedRunFailure(runs: Run[]): { count: number; hint: string; 
 export interface Run {
   id: number;
   task_id: number;
+  /** Original user description or continuation feedback captured at dispatch. */
+  prompt?: string | null;
   agent_id?: AgentId | null;
   model?: string | null;
   reasoning_effort?: string | null;
   connection?: RunConnection;
   network?: { httpsProxy?: string; httpProxy?: string };
+  /** Execution policy captured for this Run; absent on older history. */
+  limits?: { timeoutMin: number | null };
   kind: 'normal' | 'resume';
   /** adapter 会话 id（codex thread id），续跑的钥匙 */
   session_id?: string;
@@ -152,6 +160,9 @@ export interface Run {
 
 export interface RunSummary {
   agentMessage?: string;
+  /** Explicit adapter evidence; undefined means an older record did not capture it. */
+  finalReply?: boolean;
+  agentMessageAt?: string;
   filesChanged: string[];
   diffStat: string;
   sessionId?: string;
@@ -181,19 +192,22 @@ export interface TaskView extends Task {
   confirmation?: string;
   stopping?: boolean;
   reconnecting?: boolean;
+  activityWarning?: 'connection_timeout' | 'inactive';
 }
 
-export function taskStateLabel(task: Pick<TaskView, 'state' | 'stopping' | 'reconnecting'>, language: UiLanguage = 'zh-CN'): string {
+export function taskStateLabel(task: Pick<TaskView, 'state' | 'stopping' | 'reconnecting' | 'activityWarning'>, language: UiLanguage = 'zh-CN'): string {
   if (language === 'en') {
     const labels: Record<TaskState, string> = {
       draft: '📝 Draft', queued: '⏳ Queued', running: '▶️ Running',
       awaiting_confirmation: '🟡 Awaiting confirmation', ended: '⏹ Ended', cancelled: '🚫 Cancelled',
     };
     return task.state === 'running' && task.stopping ? `${labels.running} · Stopping`
+      : task.state === 'running' && task.activityWarning ? `${labels.running} · ${task.activityWarning === 'inactive' ? 'No visible activity' : 'Connection timed out'}`
       : task.state === 'running' && task.reconnecting ? `${labels.running} · Reconnecting` : labels[task.state];
   }
   return task.state === 'running' && task.stopping
-    ? `${TASK_STATE_LABELS.running} · 正在停止` : task.state === 'running' && task.reconnecting
+    ? `${TASK_STATE_LABELS.running} · 正在停止` : task.state === 'running' && task.activityWarning
+      ? `${TASK_STATE_LABELS.running} · ${task.activityWarning === 'inactive' ? '长时间无活动' : '连接超时'}` : task.state === 'running' && task.reconnecting
       ? `${TASK_STATE_LABELS.running} · 连接重试中` : TASK_STATE_LABELS[task.state];
 }
 
@@ -217,10 +231,15 @@ export interface RunDetails {
   failure?: ExecutionFailure;
   connection?: RunConnection;
   network?: Run['network'];
+  limits?: Run['limits'];
   elapsedMs?: number;
   stage: string;
   exitCode?: number;
   summary?: string;
+  responseKind?: 'final' | 'last_message' | 'message' | 'none';
+  finalReply?: boolean;
+  stopped?: boolean;
+  agentMessageAt?: string;
   diagnostic?: string;
   confirmation?: string;
   blocker?: string;
@@ -302,7 +321,8 @@ function runInputRequest(run: Run | undefined, summary: RunSummary | undefined):
 
 export function taskView(task: Task, run?: Run): TaskView {
   const status = task.status;
-  if (status === 'running') return { ...task, state: status, stopping: !!run?.cancellation, reconnecting: run?.connection?.state === 'retrying' };
+  if (status === 'running') return { ...task, state: status, stopping: !!run?.cancellation, reconnecting: run?.connection?.state === 'retrying',
+    activityWarning: run?.connection?.state === 'inactive' ? 'inactive' : run?.connection?.state === 'retrying' && run.connection.warnedAt ? 'connection_timeout' : undefined };
   if (status !== 'blocked' && status !== 'failed' && status !== 'done') return { ...task, state: status };
   const confirmation = status === 'blocked' ? runInputRequest(run, readRunSummary(run)) : undefined;
   return { ...task, state: confirmation ? 'awaiting_confirmation' : 'ended', confirmation };
@@ -311,7 +331,8 @@ export function taskView(task: Task, run?: Run): TaskView {
 export function runStage(run: Run): string {
   if ((run.status === 'starting' || run.status === 'running') && run.cancellation) return '正在停止';
   if (run.status === 'starting') return '准备执行';
-  if (run.status === 'running') return run.connection?.state === 'retrying' ? '连接重试中' : '运行中';
+  if (run.status === 'running') return run.connection?.state === 'inactive' ? '长时间无活动'
+    : run.connection?.state === 'retrying' ? run.connection.warnedAt ? '连接超时' : '连接重试中' : '运行中';
   if (run.status === 'queued') return '排队';
   if (run.status === 'cancelled') return '已取消';
   if (run.blocked_kind !== 'timeout' && runFailure(run)?.code === 'network_failed') return '连接失败';
@@ -334,6 +355,11 @@ export function runDetails(run: Run, agentId?: AgentId, remaining?: string | nul
   const answer = nonBlank(summary?.agentMessage) ?? '';
   const report = parseResultMarker(answer);
   const text = nonBlank(stripAgentctlLines(answer)) ?? report?.summary;
+  const stopped = !['queued', 'starting', 'running'].includes(run.status);
+  const responseKind: RunDetails['responseKind'] = !text ? 'none' : summary?.finalReply === true ? 'final'
+    : stopped && (summary?.finalReply === false || run.execution?.timedOut || run.execution?.cancelled
+      || run.status === 'cancelled' || run.blocked_kind === 'timeout' || run.blocked_kind === 'interrupted'
+      || run.exit_code !== 0) ? 'last_message' : 'message';
   const started = Date.parse(run.started_at ?? '');
   const ended = Date.parse(run.ended_at ?? '');
   const artifacts = new Map<string, RunArtifact>();
@@ -366,10 +392,11 @@ export function runDetails(run: Run, agentId?: AgentId, remaining?: string | nul
   return {
     id: run.id, agentId: run.agent_id ?? nonBlank(summary?.agentId) ?? agentId, model: nonBlank(summary?.model) ?? run.model ?? undefined,
     reasoningEffort: run.reasoning_effort ?? null, stage: runStage(run),
-    failure: runFailure(run), connection: run.connection, network: run.network,
+    failure: runFailure(run), connection: run.connection, network: run.network, limits: run.limits,
     exitCode: run.exit_code === -1 ? undefined : run.exit_code ?? undefined,
     elapsedMs: Number.isFinite(ended - started) ? Math.max(0, ended - started) : undefined,
-    summary: text, diagnostic: nonBlank(summary?.diagnostic) ? executionErrorMessage(summary!.diagnostic!) : undefined, confirmation: runInputRequest(run, summary), blocker,
+    summary: text, responseKind, finalReply: summary?.finalReply, stopped, agentMessageAt: summary?.agentMessageAt,
+    diagnostic: nonBlank(summary?.diagnostic) ? executionErrorMessage(summary!.diagnostic!) : undefined, confirmation: runInputRequest(run, summary), blocker,
     remaining: nonBlank(summary?.remaining) ?? report?.remaining
       ?? (remaining === '（agent 未给出明细）' ? undefined : nonBlank(remaining)),
     artifacts: [...artifacts.values()],
@@ -381,21 +408,81 @@ export function runDetails(run: Run, agentId?: AgentId, remaining?: string | nul
   };
 }
 
-export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): string {
-  if (language === 'en') {
-    const stages: Record<string, string> = {
+export function runStageLabel(stage: string, language: UiLanguage = 'zh-CN'): string {
+  const stages: Record<string, string> = {
       '准备执行': 'Preparing', '运行中': 'Running', '排队': 'Queued', '已取消': 'Cancelled',
       '运行超时': 'Timed out', '运行中断': 'Interrupted', '认证未通过': 'Authentication failed',
       '执行器请求受限': 'Agent request limited', '正常退出': 'Normal exit', '异常退出': 'Non-zero exit',
       '启动失败': 'Startup failed', '执行异常': 'Execution error', '已停止': 'Stopped',
       '启动检查未通过': 'Startup check failed', '正在停止': 'Stopping',
       '连接重试中': 'Reconnecting', '连接失败': 'Connection failed',
-    };
-    const elapsed = details.elapsedMs === undefined ? '' : ` · ${(details.elapsedMs / 1000).toFixed(1)} seconds`;
-    const exit = details.exitCode === undefined ? '' : ` · Exit code ${details.exitCode}`;
-    return `Run #${details.id} · ${details.agentId ?? 'Agent not recorded'}${details.model ? ' / ' + details.model : ''}${details.reasoningEffort ? ' · ' + reasoningLabel(details.reasoningEffort, language) : ''} · ${stages[details.stage] ?? details.stage}${exit}${elapsed}`;
+      '连接超时': 'Connection timed out', '长时间无活动': 'No visible activity',
+  };
+  return language === 'en' ? stages[stage] ?? stage : stage;
+}
+
+export function taskRunStateLabel(task: Pick<TaskView, 'state' | 'stopping' | 'reconnecting' | 'activityWarning'>, details?: RunDetails, language: UiLanguage = 'zh-CN'): string {
+  const label = taskStateLabel(task, language);
+  return task.state === 'ended' && details ? `${label} · ${runStageLabel(details.stage, language)}` : label;
+}
+
+export const MAX_TASK_TIMEOUT_MIN = Math.floor(2_147_483_647 / 60_000);
+export function validateTaskTimeout(value: unknown): number | null {
+  if (value === undefined || value === null || value === 0) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_TASK_TIMEOUT_MIN) {
+    throw new Error(`执行时限必须是 1–${MAX_TASK_TIMEOUT_MIN} 的整数分钟，留空或 0 表示不限时`);
   }
-  const elapsed = details.elapsedMs === undefined ? '' : ` · 耗时 ${(details.elapsedMs / 1000).toFixed(1)} 秒`;
+  return value;
+}
+export function runLimitLabel(limits: Run['limits'], language: UiLanguage = 'zh-CN'): string {
+  return language === 'en' ? `Run time limit: ${!limits ? 'Not recorded' : limits.timeoutMin ? `${limits.timeoutMin} minute${limits.timeoutMin===1?'':'s'}` : 'Unlimited'}`
+    : `单轮执行时限：${!limits ? '未记录' : limits.timeoutMin ? `${limits.timeoutMin} 分钟` : '不限时'}`;
+}
+
+/** Shared labels describe recorded output without interpreting its wording. */
+export function runReplyPresentation(details: RunDetails, language: UiLanguage = 'zh-CN'): { title: string; notice?: string } {
+  const t = (zh: string, en: string) => language === 'en' ? en : zh;
+  const kind = details.responseKind ?? (details.summary ? 'message' : 'none');
+  if (kind === 'final') return { title: t('Agent 最终答复', 'Agent final response') };
+  const notice = details.stopped && (kind === 'last_message' || kind === 'none')
+    ? details.confirmation ? t('本轮已停下，等待你的确认。', 'This run has stopped and is awaiting your input.')
+      : details.finalReply === true ? t('本轮已停止，Agent 未提供正文答复。', 'This run has stopped. The Agent supplied no response text.')
+      : kind === 'last_message' && details.finalReply === undefined ? t('本轮已停止，以下是停止前记录的消息。', 'This run has stopped. The message below was recorded before it stopped.')
+      : t('本轮已停止，未收到最终答复。', 'This run has stopped. No final response was received.') : undefined;
+  if (kind === 'last_message') return { title: t('停止前最后一条消息', 'Last message before stopping'), notice };
+  if (kind === 'none') return { title: details.confirmation ? t('Agent 未提供其他答复', 'No additional Agent response')
+    : details.finalReply === true ? t('Agent 未提供正文答复', 'The Agent supplied no response text') : details.stopped ? t('本轮没有收到 Agent 答复', 'No Agent response was received in this run')
+    : t('暂未收到 Agent 消息', 'No Agent message yet'), notice };
+  return { title: details.stopped === false ? t('Agent 最近消息', 'Latest Agent message') : t('Agent 答复', 'Agent response') };
+}
+
+export function formatDuration(milliseconds: number): string {
+  let seconds = Number.isFinite(milliseconds) ? Math.max(0, Math.floor(milliseconds / 1000)) : 0;
+  const parts: string[] = [];
+  for (const [size, unit] of [[86400, 'd'], [3600, 'h'], [60, 'm'], [1, 's']] as const) {
+    const value = Math.floor(seconds / size);
+    if (value) parts.push(`${value}${unit}`);
+    seconds %= size;
+  }
+  return parts.join('') || '0s';
+}
+
+export function taskDescriptions(task: Task, runs: Run[]): { original: string; current?: string } {
+  const ordered = [...runs].sort((a, b) => a.id - b.id);
+  const latest = ordered.at(-1);
+  return {
+    original: ordered[0]?.prompt ?? task.prompt,
+    current: task.pending_feedback ?? latest?.prompt ?? (latest?.kind === 'resume' ? undefined : task.prompt),
+  };
+}
+
+export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): string {
+  if (language === 'en') {
+    const elapsed = details.elapsedMs === undefined ? '' : ` · ${formatDuration(details.elapsedMs)}`;
+    const exit = details.exitCode === undefined ? '' : ` · Exit code ${details.exitCode}`;
+    return `Run #${details.id} · ${details.agentId ?? 'Agent not recorded'}${details.model ? ' / ' + details.model : ''}${details.reasoningEffort ? ' · ' + reasoningLabel(details.reasoningEffort, language) : ''} · ${runStageLabel(details.stage, language)}${exit}${elapsed}`;
+  }
+  const elapsed = details.elapsedMs === undefined ? '' : ` · 耗时 ${formatDuration(details.elapsedMs)}`;
   const exit = details.exitCode === undefined ? '' : ` · 退出码 ${details.exitCode}`;
   return `Run #${details.id} · ${details.agentId ?? 'Agent 未记录'}${details.model ? ' / ' + details.model : ''}${details.reasoningEffort ? ' · ' + reasoningLabel(details.reasoningEffort) : ''} · ${details.stage}${exit}${elapsed}`;
 }
@@ -521,13 +608,31 @@ export interface AdapterEvent {
   text?: string;
   /** 这条答复明确请求的必需输入，与该答复一起更新。 */
   inputRequest?: string;
+  /** The adapter explicitly identifies this message, or the preceding response, as final. */
+  final?: boolean;
   activity?: AgentActivity;
   /** A model stream advanced; no reasoning text is exposed as user activity. */
   progress?: boolean;
 }
 
+export interface AgentReply {
+  text: string;
+  final: boolean;
+  inputRequest?: string;
+  receivedAt?: string;
+}
+
+export function collectAgentReply(reply: AgentReply, event: AdapterEvent, receivedAt?: string): AgentReply {
+  if (event.type === 'agent_message' && event.text !== undefined) {
+    return { text: event.text, final: event.final === true, inputRequest: event.inputRequest, receivedAt };
+  }
+  if (event.final && reply.text.trim()) return { ...reply, final: true };
+  if (event.activity?.kind === 'turn' && event.activity.phase === 'started' && reply.final) return { ...reply, final: false };
+  return reply;
+}
+
 /** 通知器：daemon 只发领域事件，实现方决定发到哪（Console/钉钉/企微/邮件…） */
-export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskActions; repeatedFailure?: { count: number; hint: string } } & (
+export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskActions; activities?: RunActivity[]; repeatedFailure?: { count: number; hint: string } } & (
   | { kind: 'run.connection_warning' | 'run.connection_recovered'; task: Task; project: Project; connection: RunConnection }
   | { kind: 'run.started'; task: Task; project: Project }
   | { kind: 'run.cancelled'; task: Task; project: Project; summary: RunSummary }
@@ -561,6 +666,7 @@ export interface FeedbackAction {
   prompt?: string;
   projectId?: number;
   projectName?: string;
+  timeoutMin?: number | null;
   language?: UiLanguage;
 }
 

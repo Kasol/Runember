@@ -67,9 +67,9 @@ test('recent activity shows a bounded, durable list for the current Run', async 
   assert.doesNotMatch(reply.message, /Agent 开始执行|job [12]\n|late message/);
   assert.equal(store.recentRunActivities(run.id).length, 10);
   const status = (await dispatch(`状态 ${task.id}`)).message;
-  assert.match(status, /最近活动（最多 10 条）/);
-  assert.equal(status.split('\n').filter(line => /^- \d\d:/.test(line)).length, 10);
-  assert.match(status, /npm test 12 cases/);
+  assert.doesNotMatch(status, /最近活动（最多 10 条）|npm test 12 cases/);
+  assert.match(status, /原始描述[\s\S]*activity fixture/);
+  assert.match(status, /本轮描述[\s\S]*continue/);
   assert.doesNotMatch(status, /最近活动 \d+`/);
 });
 
@@ -117,7 +117,7 @@ test('DingTalk starts dashboard drafts and combines retry with session continuat
   assert.equal((await dispatch(`执行 ${finished.id} 附加描述`)).ok, false);
   assert.equal(store.getTask(finished.id)?.prompt, '已完成任务');
   const detail = await dispatch(`状态 ${finished.id}`);
-  for (const content of ['完整的测试总结', '**⏹ 已结束**', '**待完成**\n\n还有这件事']) {
+  for (const content of ['完整的测试总结', '**⏹ 已结束 · 已停止**', '**待完成**\n\n还有这件事']) {
     assert.ok(detail.message.includes(content));
   }
   assert.doesNotMatch(detail.message, /\*\*卡点\*\*/);
@@ -147,7 +147,7 @@ test('DingTalk starts dashboard drafts and combines retry with session continuat
   const olderPause = store.addTask(project.id, '旧版记为完成的 Git 冲突草案');
   const oldRun = store.beginRun(olderPause.id)!;
   store.finishRun(oldRun.id, { status: 'succeeded', session_id: 'old-codex-session' }, 'done');
-  assert.match((await dispatch(`状态 ${olderPause.id}`)).message, /\*\*⏹ 已结束\*\*/);
+  assert.match((await dispatch(`状态 ${olderPause.id}`)).message, /\*\*⏹ 已结束 · 已停止\*\*/);
   assert.equal((await dispatch(`继续 ${olderPause.id} 确认按草案继续`)).ok, true);
   assert.equal(store.getTask(olderPause.id)?.pending_feedback, '确认按草案继续');
   assert.equal(store.lastSessionOfTask(olderPause.id), 'old-codex-session');

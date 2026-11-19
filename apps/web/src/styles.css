@@ -225,7 +225,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 .summary { background: #f0f7ff; border-left: 3px solid #1677ff; padding: 10px 14px; border-radius: 0 8px 8px 0; margin-bottom: 14px; font-size: 13.5px; }
 .summary b { color: #1677ff; }
-.summary p { margin-top: 4px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.summary p, .summary blockquote { margin-top: 4px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.summary blockquote { margin: 8px 0 0; padding-left: 12px; border-left: 2px solid #c5cbd3; color: #57606a; }
 .dim { color: #8a93a0; font-size: 12.5px; }
 .agent-info { color: #57606a; font-size: 12px; line-height: 1.5; margin: 5px 0; overflow-wrap: anywhere; }
 

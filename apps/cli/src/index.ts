@@ -9,7 +9,7 @@
  *   retry <taskId> / cancel <taskId>
  *   auth [codex]
  */
-import { agentLabel, runStage, runTiming, reasoningLabel, taskStateLabel, failureHint, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
+import { taskDescriptions, agentLabel, runStage, runTiming, reasoningLabel, taskStateLabel, taskRunStateLabel, runReplyPresentation, runLimitLabel, validateTaskTimeout, failureHint, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -115,7 +115,9 @@ async function main(): Promise<void> {
       return;
     }
     case 'draft': {
-      const [sub, idOrProject, ...text] = rest;
+      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'}}});
+      const timeout_min=values['timeout-min']===undefined?undefined:validateTaskTimeout(Number(values['timeout-min']));
+      const [sub, idOrProject, ...text] = positionals;
       if (sub === 'list') {
         const { drafts } = await api('GET', '/api/drafts') as { drafts: TaskView[] };
         for (const draft of drafts) console.log(`#${draft.id} · ${agentLabel(draft.agent_id)} · ${draft.prompt}`);
@@ -123,23 +125,25 @@ async function main(): Promise<void> {
       }
       const prompt = text.join(' ');
       if (sub === 'add' && idOrProject && prompt.trim()) {
-        const { task } = await api('POST', '/api/tasks', { project: idOrProject, prompt, draft: true });
+        const { task } = await api('POST', '/api/tasks', { project: idOrProject, prompt, draft: true, timeout_min });
         console.log(`草稿 #${task.id} 已保存。`);
         return;
       }
       if (idOrProject && /^#?\d+$/.test(idOrProject) && ((sub === 'edit' && prompt.trim()) || sub === 'run')) {
         const id = Number(idOrProject.replace(/^#/, ''));
-        await api('POST', `/api/tasks/${id}/draft`, sub === 'edit' ? { op: 'edit', prompt } : { op: 'enqueue' });
+        await api('POST', `/api/tasks/${id}/draft`, sub === 'edit' ? { op: 'edit', prompt, timeout_min } : { op: 'enqueue', timeout_min });
         console.log(`草稿 #${id} ${sub === 'edit' ? '已更新' : '已入队'}。`);
         return;
       }
       throw new Error('用法: desk draft list | draft add <项目> <描述> | draft edit <编号> <描述> | draft run <编号>');
     }
     case 'run': {
-      const [project, ...promptParts] = rest;
+      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'}}});
+      const timeout_min=values['timeout-min']===undefined?null:validateTaskTimeout(Number(values['timeout-min']));
+      const [project, ...promptParts] = positionals;
       const prompt = promptParts.join(' ');
-      if (!project || !prompt) { console.log('用法: desk run <projectName> "任务指令"'); return; }
-      const { task } = await api('POST', '/api/tasks', { project, prompt });
+      if (!project || !prompt) { console.log('用法: desk run <projectName> "任务指令" [--timeout-min 分钟]'); return; }
+      const { task } = await api('POST', '/api/tasks', { project, prompt, timeout_min });
       console.log(`📋 任务已入队 #${task.id}（项目 ${project}）`);
       console.log(`   查看进度: npm run desk -- status ${task.id}`);
       return;
@@ -187,14 +191,17 @@ async function main(): Promise<void> {
           task: TaskView; runs: Run[]; details?: RunDetails; repeatedFailure?: { count: number; hint: string }; actions: TaskActions; agentId?: string;
           merge?: { repo?: string; pr?: number; completed?: string };
         };
-        console.log(`任务 #${task.id} [${taskStateLabel(task)}]`);
+        console.log(`任务 #${task.id} [${taskRunStateLabel(task, details)}]`);
         if (task.state === 'running') console.log(`查看 Agent 进展 · desk activity ${id}`);
         if (repeatedFailure) console.log(`💡 连续 ${repeatedFailure.count} 轮出现同类故障。${repeatedFailure.hint}仍可主动续跑。`);
         if (task.confirmation) console.log(`请确认\n${task.confirmation}\n`);
         if (details) {
           console.log(runTiming(details));
+          console.log(runLimitLabel(details.limits));
+          const response = runReplyPresentation(details);
+          if (response.notice) console.log(response.notice);
           if (details.network) console.log(`启动时 HTTPS 代理 · ${details.network.httpsProxy || '未指定'}`);
-          if (details.connection?.state === 'retrying' && task.state === 'running') console.log(`连接重试中 · ${details.connection.reason}\n开始重连 · ${details.connection.since}\n最后有效活动 · ${details.connection.lastProgressAt}`);
+          if ((details.connection?.state === 'retrying' || details.connection?.state === 'inactive') && task.state === 'running') console.log(`${details.stage} · ${details.connection.reason}\n观察起点 · ${details.connection.since}\n最近可见活动 · ${details.connection.lastVisibleActivityAt ?? details.connection.lastProgressAt}\n执行器仍在运行，可查看日志或主动取消。`);
           if (details.cancellationRequestedAt) {
             console.log(`请求取消 · ${details.cancellationRequestedAt}`);
             if (details.stoppedAt) console.log(`执行器停止 · ${details.stoppedAt}`);
@@ -206,12 +213,13 @@ async function main(): Promise<void> {
           if (details.blocker) console.log(`卡点\n${details.blocker}`);
           if (details.remaining) console.log(`待完成\n${details.remaining}`);
           for (const artifact of details.artifacts) console.log(`产物 · ${artifact.label} · ${artifact.location}`);
-          if (details.summary) console.log(`\nAgent 最终答复\n${details.summary}`);
+          console.log(`\n${response.title}${details.summary ? '\n' + details.summary : ''}`);
         } else if (agentId) {
           console.log(`Agent · ${agentLabel(agentId)}${task.model ? ' / ' + task.model : ''}`);
           console.log(reasoningLabel(task.reasoning_effort));
         }
-        console.log(`\n任务描述\n${task.prompt}`);
+        const descriptions = taskDescriptions(task, runs);
+        console.log(`\n原始描述\n${descriptions.original}\n\n本轮描述\n${descriptions.current ?? '未记录'}`);
         if (actions.resume) console.log(`${actions.resume === 'session' ? '续跑原会话' : '以新会话继续'} · desk resume ${id} [说明]`);
         if (actions.retry) console.log(`${merge ? '核对并继续合并' : '重试（新会话）'} · desk retry ${id}`);
         if (merge?.repo && merge.pr) console.log(`  PR https://github.com/${merge.repo}/pull/${merge.pr}`);
@@ -219,7 +227,7 @@ async function main(): Promise<void> {
           console.log(`  Run #${r.id} · ${agentLabel(r.agent_id ?? task.agent_id)}${r.model ? ' / ' + r.model : ''} · ${reasoningLabel(r.reasoning_effort)} · ${r.kind === 'resume' ? '续跑' : '执行'} · ${runStage(r)}` +
             `${r.session_id ? ' session=' + r.session_id.slice(0, 8) : ''}`);
           if (r.checkpoint_sha) console.log(`    Git checkpoint ${r.checkpoint_sha}`);
-          if (r.log_path) console.log(`    完整日志 · ${r.log_path}`);
+          if (task.state !== 'running' && r.log_path) console.log(`    完整日志 · ${r.log_path}`);
         }
         if (merge?.completed) console.log(merge.completed);
         return;

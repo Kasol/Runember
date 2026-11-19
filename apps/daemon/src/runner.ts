@@ -13,13 +13,13 @@ import { StringDecoder } from 'node:string_decoder';
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { classifyRun, taskStatusAfterRun, parseResultMarker, readRunSummary, runDetails, repeatedRunFailure } from '@agentdesk/core';
+import { classifyRun, taskStatusAfterRun, parseResultMarker, readRunSummary, runDetails, repeatedRunFailure, collectAgentReply, type AgentReply } from '@agentdesk/core';
 import { availableTaskActions } from './actions.js';
 import { getAdapterId } from './util.js';
 import { hostCheckpoint, hostAudit, hostGitOperation } from './hostgit.js';
 import { MergeBlocked, runMerge } from './merge.js';
 import { prepareMcpConfig } from './mcp.js';
-import { hostCodexLoginStatus, hostCodexProxyEnv } from './native.js';
+import { hostCodexLoginStatus, hostCodexProxyEnv, retainOutput, outputTailLine } from './native.js';
 import { findNativeAgent, prepareNativeAgent, runtimeConfig } from './agent-runtime.js';
 import { nativeExecution, runManagedNative, stoppedNativeGroup } from './managed-native.js';
 import { ConnectionWatch } from './connection-watch.js';
@@ -60,6 +60,7 @@ function lineSink(onLine: (l: string) => void): Writable {
 }
 
 export class Runner {
+  private recoveredActivity = new Map<number, { watch: ConnectionWatch; at?: string }>();
   private stopping = new Map<number, Promise<void>>();
 
   constructor(private deps: RunnerDeps) {}
@@ -85,6 +86,7 @@ export class Runner {
     timeoutMs: number; tag: string; onStdoutLine?: (l: string) => void; onStderrLine?: (l: string) => void;
     onContainer?: (id: string) => void;
     beforeStart?: (id: string) => boolean;
+    captureTail?: number;
   }): Promise<SpawnResult> {
     const { docker } = this.deps;
     const out: string[] = [];
@@ -117,10 +119,10 @@ export class Runner {
       }
       await container.start();
       opts.onContainer?.(container.id);
-      timer = setTimeout(() => { killed = true; void container.kill().catch(() => {}); }, opts.timeoutMs);
+      if (opts.timeoutMs > 0) timer = setTimeout(() => { killed = true; void container.kill().catch(() => {}); }, opts.timeoutMs);
       stream = await container.logs({ follow: true, stdout: true, stderr: true }) as Readable;
-      const stdout = lineSink(l => { out.push(l); opts.onStdoutLine?.(l); });
-      const stderr = lineSink(l => { err.push(l); opts.onStderrLine?.(l); });
+      const stdout = lineSink(l => { retainOutput(out,l,opts.captureTail); opts.onStdoutLine?.(l); });
+      const stderr = lineSink(l => { retainOutput(err,l,opts.captureTail); opts.onStderrLine?.(l); });
       const drained = finished(stream, { cleanup: true }).catch(error => {
         err.push(`读取容器日志异常：${(error as Error).message}`);
       });
@@ -228,6 +230,7 @@ export class Runner {
       cmd: opts.cmd, cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs,
       onStdoutLine: opts.onStdoutLine,
       onStderrLine: opts.onStderrLine,
+      captureTail: 32,
     }, opts.control, opts.onPid);
     const execution = nativeExecution(opts.control);
     if (!execution && existsSync(opts.control + '.active')) throw new Error('宿主进程树停止结果无法核实');
@@ -336,7 +339,7 @@ export class Runner {
             this.updateCancellation(run.id, { issue: `无法核实受管进程树：${(error as Error).message}` });
           }
         }
-        if (!execution) return false;
+        if (!execution) { this.observeRecovered(run); return false; }
       }
     } else if (!execution && worker?.kind === 'docker') {
       const container = docker.getContainer(worker.id);
@@ -350,6 +353,7 @@ export class Runner {
       }
       if (state?.Running || state?.Restarting || state?.Paused) {
         if (run.cancellation) await this.requestStop({ ...run, status: 'running' });
+        this.observeRecovered(run);
         return false;
       }
       if (state?.Status === 'created') {
@@ -371,6 +375,7 @@ export class Runner {
       }
     } else if (!execution && await this.workerIsAlive(worker)) {
       if (run.cancellation) await this.requestStop(run);
+      this.observeRecovered(run);
       return false;
     }
     if (!execution && !worker && run.cancellation) execution = this.cancelledExecution();
@@ -397,6 +402,27 @@ export class Runner {
     this.finish(task, project, run.id, result, summary, run.log_path ?? undefined, execution);
     if (worker?.kind === 'docker') await docker.getContainer(worker.id).remove().catch(() => {});
     return true;
+  }
+
+  private observeRecovered(run: Run): void {
+    if (run.cancellation) return;
+    const { store, events, cfg } = this.deps;
+    const activities = store.recentRunActivities(run.id);
+    const at = activities.at(-1)?.at ?? run.started_at;
+    let tracker = this.recoveredActivity.get(run.id);
+    if (!tracker) {
+      const watch = new ConnectionWatch({ previous: run.connection, lastVisibleAt: at,
+        inactivityAfterMs: cfg.scheduler.inactivityWarningMin * 60_000,
+        changed: connection => store.updateRun(run.id, { connection }),
+        notify: (kind, connection) => {
+          const current = store.getRun(run.id), task = store.getTask(run.task_id);
+          if (current && task?.status === 'running' && !current.cancellation && !current.execution) events.emit({kind,connection,runId:run.id,task,
+            project:this.projectForTask(task),details:runDetails(current),activities:store.recentRunActivities(run.id)});
+        },
+      });
+      tracker = {watch,at};this.recoveredActivity.set(run.id,tracker);
+    } else if (at && at !== tracker.at) { tracker.at = at;tracker.watch.progress(); }
+    tracker.watch.tick();
   }
 
   async execute(taskId: number): Promise<void> {
@@ -451,7 +477,7 @@ export class Runner {
           worktree: resolve(cfg.dataDir, 'merge-worktrees', String(task.id)),
           plan: merge.plan, state: merge.state,
           save: state => store.saveMerge(task.id, state),
-          log: record, testTimeout: cfg.scheduler.taskTimeoutMin * 60_000,
+          log: record, testTimeout: (run.limits?.timeoutMin ?? 0) * 60_000,
           onTestPid: pid => store.updateRun(run.id, { worker: { kind: 'native', pid } }),
         });
         record(result.message + '\n');
@@ -476,7 +502,7 @@ export class Runner {
     const agentCfg = cfg.agents[project.agent_id]!;
     const binds = this.getSpawnBinds(project, adapter.homeVolume);
     const env = ['CODEX_HOME=/codex-home', ...this.proxyEnv()];
-    const tmo = cfg.scheduler.taskTimeoutMin * 60_000;
+    const tmo = (run.limits?.timeoutMin ?? 0) * 60_000;
     let effectiveImage: string = adapter.image;
     // capability 模式：codex 直接跑宿主——auth/skills/MCP 全部原生（宿主 ~/.codex），
     // 跳过播种/渲染/预装/凭证容器检查（那些是隔离模式的容器环境准备工作）。
@@ -570,11 +596,10 @@ export class Runner {
         : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, executionMode, responseSchemaPath, project.model || undefined, project.reasoning_effort || undefined);
 
       let sessionId: string | undefined;
-      let lastAgentText = '';
+      let reply: AgentReply = { text: '', final: false };
       let lastAgentError = '';
       let lastAgentModel: string | undefined;
       let inputRequest: string | undefined;
-      let replyInputRequest: string | undefined;
       let warnedActivityWrite = false;
       const isNative = isCapability; // capability = 宿主原生执行
       // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
@@ -583,11 +608,12 @@ export class Runner {
       if (native) { cleanupAgent = native.cleanup; nativeEnv.push(...native.env); }
       const control = logPath + '.control';
       const watch = new ConnectionWatch({
+        inactivityAfterMs: cfg.scheduler.inactivityWarningMin * 60_000,
         changed: connection => store.updateRun(run.id, { connection }),
         notify: (kind, connection) => {
           const current = store.getRun(run.id);
           if (current && ['starting', 'running'].includes(current.status) && !current.cancellation) events.emit({ kind, connection, runId: run.id, task, project,
-            details: runDetails(current, project.agent_id) });
+            details: runDetails(current, project.agent_id), activities: store.recentRunActivities(run.id) });
         },
       });
       const streamedErrors = new Set<string>();
@@ -600,7 +626,8 @@ export class Runner {
         const ev = adapter.parseLine(line, !!responseSchemaPath);
         if (!ev) return;
         if (ev.type === 'error' && ev.text) watch.error(ev.text);
-        if (ev.progress || ev.type === 'agent_message' && ev.text || ev.activity && (ev.activity.kind !== 'turn' || ev.activity.phase === 'completed')) watch.progress();
+        const visible = !!(ev.type === 'agent_message' && ev.text || ev.activity && (ev.activity.kind !== 'turn' || ev.activity.phase === 'completed'));
+        if (ev.progress || visible) watch.progress(visible);
         if (ev.activity) {
           try { store.recordRunActivity(run.id, { ...ev.activity, at: new Date().toISOString() }); }
           catch (error) {
@@ -613,15 +640,23 @@ export class Runner {
           sessionId = ev.sessionId;
           store.updateRun(run.id, { session_id: sessionId });
         }
-        if (ev.type === 'agent_message' && ev.text !== undefined) {
-          lastAgentText = ev.text;
-          replyInputRequest = ev.inputRequest;
+        const nextReply = collectAgentReply(reply, ev, new Date().toISOString());
+        if (nextReply !== reply) {
+          reply = nextReply;
+          const previous = readRunSummary(store.getRun(run.id));
+          store.updateRun(run.id, { summary_json: JSON.stringify({ filesChanged: [], diffStat: '', ...previous,
+            agentMessage: reply.text, finalReply: reply.final, agentMessageAt: reply.receivedAt, inputRequest: inputRequest ?? reply.inputRequest }) });
         }
         if (ev.type === 'error' && ev.text) lastAgentError = ev.text;
-        if (ev.type === 'input_requested' && ev.text?.trim()) inputRequest = ev.text;
+        if (ev.type === 'input_requested' && ev.text?.trim()) {
+          inputRequest = ev.text;
+          const previous = readRunSummary(store.getRun(run.id));
+          store.updateRun(run.id, { summary_json: JSON.stringify({ filesChanged: [], diffStat: '', ...previous, inputRequest }) });
+        }
       };
       const onStderrLine = (line: string) => {
-        streamedErrors.add(line);
+        const cached=outputTailLine(line);streamedErrors.delete(cached);streamedErrors.add(cached);
+        if(streamedErrors.size>64)streamedErrors.delete(streamedErrors.values().next().value!);
         record('[stderr] ' + line + '\n');
         watch.stderr(line);
       };
@@ -637,7 +672,7 @@ export class Runner {
             onPid: pid => store.updateRun(run.id, { status: 'running', worker: { kind: 'native', pid, control } }),
           })
         : await this.spawn({
-            image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`,
+            image: effectiveImage, cmd, binds, env, timeoutMs: tmo, tag: `run-${run.id}`, captureTail: 32,
             onStdoutLine: onLine,
             onStderrLine,
             beforeStart: id => {
@@ -662,16 +697,16 @@ export class Runner {
         exitCode: main.exitCode,
         killed: main.killed,
         interrupted: main.exitCode === null && !!store.getRun(run.id)?.worker,
-        lastAgentText,
-        inputRequest: inputRequest ?? replyInputRequest,
+        lastAgentText: reply.text,
+        inputRequest: inputRequest ?? reply.inputRequest,
         errTail: [...main.err.slice(-20), lastAgentError].join('\n'),
         primaryError: lastAgentError || undefined,
       });
       // 旧会话仍可能报告部分完成，保留未完成项供续跑。
-      const report = parseResultMarker(lastAgentText);
+      const report = parseResultMarker(reply.text);
       const summary: RunSummary = {
         agentId: project.agent_id, model: lastAgentModel ?? project.model ?? undefined,
-        agentMessage: lastAgentText || report?.summary,
+        agentMessage: reply.text || report?.summary, finalReply: reply.final, agentMessageAt: reply.receivedAt,
         filesChanged: [], diffStat: '', sessionId,
         partial: report ? !report.done : undefined,
         remaining: report?.remaining,
@@ -724,6 +759,7 @@ export class Runner {
     task: Task, project: Project, runId: number,
     result: RunResult, summary: RunSummary, logPath?: string, execution?: Run['execution'] | number,
   ): void {
+    this.recoveredActivity.delete(runId);
     const { store, events } = this.deps;
     const retryViaCli = !!store.getMerge(task.id);
     summary.agentId = project.agent_id;

@@ -116,11 +116,11 @@ test('Codex separates a structured input request from the user-facing answer', (
   const message = (text: string) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } });
   const question = '请告诉我城市名称。';
   const waiting = JSON.stringify({ answer: '', input_request: question });
-  assert.deepEqual(adapter.parseLine(message(waiting), true), { type: 'agent_message', text: '', inputRequest: question });
+  assert.deepEqual(adapter.parseLine(message(waiting), true), { type: 'agent_message', text: '', final: true, inputRequest: question });
   assert.deepEqual(adapter.parseLine(message(waiting)), { type: 'agent_message', text: waiting });
   const answer = '验收失败，流程已暂停。\n如果需要，我可以继续排查。';
   assert.deepEqual(adapter.parseLine(message(JSON.stringify({ answer, input_request: null })), true),
-    { type: 'agent_message', text: answer, inputRequest: undefined });
+    { type: 'agent_message', text: answer, final: true, inputRequest: undefined });
   assert.deepEqual(adapter.parseLine(message(question), true), { type: 'agent_message', text: question });
 });
 
