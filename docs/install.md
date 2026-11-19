@@ -1,6 +1,6 @@
 # 安装 Runember
 
-当前 Windows 团队内测版为 `v2.2.0-beta.3`：[下载 Windows 发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.3)。Mac 暂沿用 [v2.2.0-beta.2](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)，本轮尚未发布 Mac 安装包。
+当前 Windows 团队内测版为 `v2.2.0-beta.4`：[下载 Windows 发布包](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.4)。Mac 暂沿用 [v2.2.0-beta.2](https://github.com/Kasol/Runember/releases/tag/v2.2.0-beta.2)，本轮尚未发布 Mac 安装包。
 
 ## 选择安装方式
 
