@@ -77,6 +77,7 @@ async function main(): Promise<void> {
       : undefined,
     reports?.publish,
     languages.notification,
+    store,
   );
   const events = new EventBus(notifiers);
   const docker = new Docker();

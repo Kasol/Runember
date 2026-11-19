@@ -16,7 +16,7 @@ export class EventBus {
   private bus = new EventEmitter();
   private pending = new Set<Promise<void>>();
 
-  constructor(notifiers: Notifier[]) {
+  constructor(private notifiers: Notifier[]) {
     this.bus.on('event', (event: NotifyEvent) => {
       for (const n of notifiers) {
         const sent = n.notify(event).catch(e => console.error(`[notify:${n.name}] 发送失败:`, e?.message ?? e));
@@ -24,13 +24,16 @@ export class EventBus {
         void sent.finally(() => this.pending.delete(sent));
       }
     });
+    for (const notifier of notifiers) notifier.start?.();
   }
 
   emit(event: NotifyEvent): void {
     this.bus.emit('event', event);
   }
   async drain(): Promise<void> {
+    for (const notifier of this.notifiers) notifier.stop?.();
     while (this.pending.size) await Promise.allSettled(this.pending);
+    await Promise.all(this.notifiers.map(notifier => notifier.drain?.()));
   }
 }
 
@@ -55,6 +58,7 @@ export function buildNotifiers(
   appCreds?: { clientId: string; clientSecret: string },
   reportLink?: ReportLink,
   language: (conversation?: string) => UiLanguage = () => 'zh-CN',
+  deliveryStorage?: import('./report-delivery.js').DeliveryStorage,
 ): Notifier[] {
   const list: Notifier[] = [new ConsoleNotifier()];
   for (const ch of channels) {
@@ -67,6 +71,7 @@ export function buildNotifiers(
         publicUrl,
         reportLink,
         () => language(),
+        deliveryStorage,
       ));
     } else if (ch.type === 'dingtalk-app') {
       // 单机器人双职责渠道：复用 feedback.dingtalkStream 的应用凭证主动推群
@@ -80,6 +85,7 @@ export function buildNotifiers(
         },
         reportLink,
         () => language(typeof ch.conversationId === 'string' ? ch.conversationId : undefined),
+        deliveryStorage,
       ));
     } else {
       console.warn(`[notify] 未知渠道类型: ${String(ch.type)}，已跳过`);

@@ -38,6 +38,11 @@ export function detailFooter(text: string, detailUrl?: string, language: UiLangu
   return detailUrl ? `${text}\n\n---\n\n[📄 ${language === 'en' ? 'View details' : '查看详情'}](${detailUrl})` : text;
 }
 
+export function reportReadyMarkdown(event: NotifyEvent, language: UiLanguage): { title: string; text: string } {
+  const title = language === 'en' ? '📄 Detail report ready' : '📄 详情报告已生成';
+  return { title, text: `### ${title}\n\n**#${event.task.id}** ${event.project.name} · Run #${event.runId}\n\n${language === 'en' ? 'The previously unavailable report is ready. Use the link below to view the full details.' : '此前暂不可用的报告已生成，可通过下方链接查看完整详情。'}` };
+}
+
 export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?: string, language: UiLanguage = 'zh-CN', reportFailed = false): { title: string; text: string; detailUrl?: string } {
   const t = (zh: string, en: string) => language === 'en' ? en : zh;
   const task = `**#${e.task.id}** ${e.project.name} · ${e.task.agent_id ?? e.project.agent_id}${e.task.model ? ' / ' + e.task.model : ''}`;
@@ -84,7 +89,7 @@ export function buildEventMarkdown(e: NotifyEvent, publicUrl: string, reportUrl?
       details.blocker ? `${t('卡点', 'Blocker')} · ${excerpt(details.blocker, 140)}` : '',
       details.remaining ? `${t('待完成', 'Remaining work')} · ${excerpt(details.remaining, 140)}` : '',
       details.summary ? `**${t('Agent 答复', 'Agent response')}**\n\n${excerpt(details.summary, 220)}` : '',
-      reportFailed ? t('⚠️ 详情报告暂未生成，请在 Runember 查看完整内容。', '⚠️ Detail report unavailable; view full details in Runember.') : '',
+      reportFailed ? t('📄 详情报告暂不可用，恢复后会补发链接。完整内容也可在 Runember 查看。', '📄 Detail report temporarily unavailable. A link will follow when it is ready; full details are also available in Runember.') : '',
       next,
       detailLink,
     ].filter(Boolean).join('\n\n'),

@@ -82,6 +82,8 @@ export class Store {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS notification_deliveries(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS notification_deliveries_run ON notification_deliveries(json_extract(payload, '$.runId'));
     `);
     const runCols = this.db.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>;
     for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json', 'connection_json', 'network_json']) {
@@ -94,6 +96,19 @@ export class Store {
   }
 
   // ── projects ──
+  getDelivery(id: string): string | undefined {
+    return (this.db.prepare('SELECT payload FROM notification_deliveries WHERE id=?').get(id) as { payload: string } | undefined)?.payload;
+  }
+  saveDelivery(id: string, payload: string): void {
+    this.db.prepare('INSERT INTO notification_deliveries(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(id,payload);
+  }
+  listDeliveries(prefix: string): Array<{ id: string; payload: string }> {
+    return this.db.prepare('SELECT id,payload FROM notification_deliveries WHERE id LIKE ? ORDER BY id').all(prefix + '%') as Array<{ id: string; payload: string }>;
+  }
+  reportDeliveries(runId: number): Array<{ runId: number; state: string; nextAt?: number; lastError?: string }> {
+    const rows = this.db.prepare("SELECT payload FROM notification_deliveries WHERE json_extract(payload, '$.runId')=?").all(runId) as Array<{ payload: string }>;
+    return rows.map(row => { const job = JSON.parse(row.payload); return { runId: job.runId, state: job.state, nextAt: job.nextAt, lastError: job.lastError }; });
+  }
   getSetting(key: string): string | undefined {
     return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as { value: string } | undefined)?.value;
   }

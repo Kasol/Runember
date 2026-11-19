@@ -380,6 +380,7 @@ export function buildServer(deps: {
       task: taskView(t, last), runs, agentId,
       details: last && runDetails(last, agentId, t.partial_remaining),
       repeatedFailure: repeatedRunFailure(runs),
+      reportDeliveries: runs.flatMap(run => store.reportDeliveries(run.id)),
       actions: merge && !canManageMerge(req.ip)
         ? { resume: false, retry: false, cancel: false } : availableTaskActions(store, t),
       merge: merge && { repo: merge.state.repo, pr: merge.state.pr, verified: merge.state.verified, completed: merge.state.completed },
@@ -387,6 +388,19 @@ export function buildServer(deps: {
   });
 
   /** 反馈闭环入口：与钉钉 Stream 通道共用 applyTaskAction，语义完全一致 */
+  app.post<{ Params: { id: string }; Body: { runId?: number } }>('/api/tasks/:id/report/retry', async (req, reply) => {
+    const localOrigin = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname.toLowerCase()) &&
+      [`http://${req.host}`, `https://${req.host}`].includes(req.headers.origin ?? '');
+    if (!cfg.server.token && (!isLoopback(req.ip) || !!req.headers.origin && !localOrigin)) return reply.code(403).send({ error: '重试报告需要本机看板或连接密钥' });
+    const task = store.getTask(Number(req.params.id));
+    if (!task) return reply.code(404).send({ error: '任务不存在' });
+    const runId = req.body?.runId;
+    if (!Number.isSafeInteger(runId) || !runId || runId < 1) return reply.code(400).send({ error: '请输入有效的 Run 编号' });
+    const run = store.getRun(runId);
+    if (!run || run.task_id !== task.id) return reply.code(404).send({ error: '该 Run 不属于当前任务' });
+    return { scheduled: deps.notifiers.reduce((count, notifier) => count + (notifier.retryReport?.(runId) ?? 0), 0) };
+  });
+
   app.post<{ Params: { id: string }; Body: { type: string; feedback?: string; runId?: number } }>(
     '/api/tasks/:id/actions', async (req, reply) => {
       const { type, feedback, runId } = req.body ?? ({} as any);

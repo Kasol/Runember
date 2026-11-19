@@ -58,7 +58,8 @@ export const client = {
   updateDingtalkSettings: (language: LanguagePreference) => api<{ language: LanguagePreference }>('PATCH', '/api/settings/dingtalk', { language }),
   projects: () => api<{ projects: Project[] }>('GET', '/api/projects'),
   tasks: () => api<{ tasks: TaskView[] }>('GET', '/api/tasks'),
-  task: (id: number) => api<{ task: TaskView; runs: Run[]; details?: RunDetails; repeatedFailure?: { count: number; hint: string }; actions: TaskActions; agentId?: string; merge?: MergeStatus }>('GET', `/api/tasks/${id}`),
+  task: (id: number) => api<{ task: TaskView; runs: Run[]; details?: RunDetails; repeatedFailure?: { count: number; hint: string }; reportDeliveries?: Array<{ runId: number; state: string; lastError?: string; nextAt?: number }>; actions: TaskActions; agentId?: string; merge?: MergeStatus }>('GET', `/api/tasks/${id}`),
+  retryReport: (id: number, runId: number) => api<{ scheduled: number }>('POST', `/api/tasks/${id}/report/retry`, { runId }),
   runLog: (id: number, before?: number) => api<{ text: string; before: number | null }>(
     'GET', `/api/runs/${id}/log${before === undefined ? '' : `?before=${before}`}`,
   ),

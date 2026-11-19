@@ -468,6 +468,8 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
   const [selectedRunId, setSelectedRunId] = useState<number>();
   const [error, setError] = useState('');
   const [diagnosing, setDiagnosing] = useState(false);
+  const [retryingReport, setRetryingReport] = useState(false);
+  const [reportMessage, setReportMessage] = useState('');
 
   useEffect(() => {
     let alive = true;
@@ -514,6 +516,17 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
         <p>执行器仍在运行。请检查环境设置中的代理和连接，可主动取消。</p>
       </div>}
       {data?.repeatedFailure && <div className="advice" role="note">💡 连续 {data.repeatedFailure.count} 轮出现同类故障。{data.repeatedFailure.hint}仍可主动续跑。</div>}
+      {data?.reportDeliveries?.filter(job => job.state !== 'complete').map((job, index) => <div className="advice" role="status" key={`report-${job.runId}-${index}`}>
+        📄 Run #{job.runId} · {job.state === 'pending' ? '详情报告和通知正在准备' : job.state === 'expired' ? '详情报告自动重试已到期' : '结果已通知，详情报告等待恢复后补发'}
+        {job.lastError && <p>{job.lastError}</p>}
+        <button disabled={retryingReport} onClick={async () => {
+          setRetryingReport(true); setReportMessage('');
+          try { const result = await client.retryReport(props.taskId, job.runId); setReportMessage(result.scheduled ? '已请求重试报告，不会重新执行任务。' : '报告已在处理中，或无需重试。'); }
+          catch (e) { setReportMessage((e as Error).message); }
+          finally { setRetryingReport(false); }
+        }}>重试报告</button>
+      </div>)}
+      {reportMessage && <p className="dim" role="status">{reportMessage}</p>}
       {task && <div className="task-diagnostics"><button onClick={() => setDiagnosing(!diagnosing)}>{diagnosing ? '收起运行诊断' : '诊断此轮运行'}</button>
         {diagnosing && <Diagnostics task={task.id} run={selectedRunId ?? details?.id} />}</div>}
       {merge?.repo && merge.pr && (

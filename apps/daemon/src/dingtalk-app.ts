@@ -6,12 +6,14 @@
  */
 import type { NotifyEvent, UiLanguage } from '@agentdesk/core';
 import { DedupedNotifier } from './notify-base.js';
-import { buildEventMarkdown, detailFooter } from './dingtalk-markdown.js';
+import { buildEventMarkdown, detailFooter, reportReadyMarkdown } from './dingtalk-markdown.js';
 import type { ReportLink } from './dingtalk-reports.js';
+import { ReportDelivery, type DeliveryStorage } from './report-delivery.js';
 
 export class DingTalkAppNotifier extends DedupedNotifier {
   readonly name = 'dingtalk-app';
   private token?: { v: string; exp: number };
+  private delivery?: ReportDelivery;
 
   constructor(
     private clientId: string,
@@ -21,9 +23,22 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     private destination: { conversationId?: string; robotCode?: string } = {},
     private reportLink?: ReportLink,
     private language: () => UiLanguage = () => 'zh-CN',
+    storage?: DeliveryStorage,
   ) {
     super(30 * 60 * 1000);
+    if (reportLink) this.delivery = new ReportDelivery({ storage, identity: ['dingtalk-app', clientId, destination.conversationId], publish: reportLink,
+      accept: event => this.events.includes(event.kind.replace('run.', '')),
+      result: (event, lang, url, failed) => this.sendResult(event, lang, url, failed),
+      link: async (event, lang, url) => {
+        const md = reportReadyMarkdown(event, lang); await this.post(md.title, md.text, url, lang);
+        console.log(`[notify:dingtalk-app] 钉钉已接受报告链接 task=${event.task.id} run=${event.runId}`);
+      },
+    });
   }
+  start(): void { this.delivery?.start(); }
+  stop(): void { this.delivery?.stop(); }
+  async drain(): Promise<void> { await this.delivery?.drain(); }
+  retryReport(runId: number): number { return this.delivery?.retry(runId) ?? 0; }
 
   async sendRaw(title: string, text: string): Promise<void> {
     await this.post(title, text);
@@ -32,6 +47,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
   private async getToken(): Promise<string> {
     if (this.token && Date.now() < this.token.exp - 60_000) return this.token.v;
     const res = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
+      signal: AbortSignal.timeout(15_000),
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ appKey: this.clientId, appSecret: this.clientSecret }),
@@ -47,6 +63,7 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     if (!conversationId) throw new Error('钉钉主动通知缺少 conversationId');
     const token = await this.getToken();
     const res = await fetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
+      signal: AbortSignal.timeout(15_000),
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
       body: JSON.stringify({
@@ -64,12 +81,10 @@ export class DingTalkAppNotifier extends DedupedNotifier {
     const connection = e.kind === 'run.connection_warning' || e.kind === 'run.connection_recovered';
     if (!this.events.includes(connection ? 'failed' : e.kind.replace('run.', ''))) return;
     const language = this.language();
-    let reportFailed = false;
-    const reportUrl = connection ? undefined : await this.reportLink?.(e, language).catch(error => {
-      console.warn(`[dingtalk-report] task=${e.task.id} run=${e.runId} ${(error as Error).message}`);
-      reportFailed = true;
-      return undefined;
-    });
+    if (this.delivery && !connection && e.kind !== 'run.started') return this.delivery.deliver(e, language);
+    await this.sendResult(e, language);
+  }
+  private async sendResult(e: NotifyEvent, language: UiLanguage, reportUrl?: string, reportFailed = false): Promise<void> {
     const md = buildEventMarkdown(e, this.publicUrl, reportUrl, language, reportFailed);
     if (md) {
       await this.post(md.title, md.text, md.detailUrl, language);

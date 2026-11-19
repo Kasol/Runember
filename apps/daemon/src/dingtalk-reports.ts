@@ -8,12 +8,13 @@ import type { DingTalkReportConfig } from './config.js';
 import { runDetailsMarkdown } from './dingtalk-markdown.js';
 import type { Store } from './store.js';
 
-export type ReportLink = (event: NotifyEvent, language?: UiLanguage) => Promise<string | undefined>;
+export type ReportLink = (event: NotifyEvent, language?: UiLanguage, options?: { deadlineAt?: number }) => Promise<string | undefined>;
 
 interface DocumentReceipt {
-  state: 'creating' | 'writing' | 'ready';
+  state: 'creating' | 'writing' | 'verifying' | 'ready';
   nodeId?: string;
   url?: string;
+  contentHash?: string;
 }
 
 interface DwsResult {
@@ -28,6 +29,10 @@ interface DwsResult {
 }
 
 const invoke = promisify(execFile);
+
+export class ReportError extends Error {
+  constructor(message: string, public retryable = true) { super(message); }
+}
 
 function fenced(text: string): string {
   const longest = Math.max(2, ...Array.from(text.matchAll(/^`+/gm), match => match[0].length));
@@ -84,28 +89,32 @@ export class DingTalkReports {
     private cfg: DingTalkReportConfig,
     private store: Store,
     logDir: string,
+    private options: { retryDelaysMs?: number[] } = {},
   ) {
     const key = createHash('sha256')
       .update(JSON.stringify([resolve(cfg.configDir), cfg.profile ?? '', cfg.folder ?? ''])).digest('hex').slice(0, 16);
     this.directory = resolve(logDir, 'reports', `dingtalk-${key}`);
   }
 
-  publish: ReportLink = (event, language = 'zh-CN') => {
+  publish: ReportLink = (event, language = 'zh-CN', options) => {
     if (event.kind === 'run.started' || event.kind.startsWith('run.connection_')) return Promise.resolve(undefined);
     const existing = this.pending.get(event.runId);
     if (existing) return existing;
-    const job = this.tail.catch(() => {}).then(() => this.create(event, language));
+    const deadlineAt = options?.deadlineAt ?? Date.now() + 180_000;
+    const job = this.tail.catch(() => {}).then(() => this.create(event, language, deadlineAt));
     this.tail = job;
     this.pending.set(event.runId, job);
     void job.finally(() => this.pending.delete(event.runId)).catch(() => {});
     return job;
   };
 
-  private async call(args: string[]): Promise<DwsResult> {
+  private async call(args: string[], deadlineAt = Date.now() + 180_000): Promise<DwsResult> {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw new ReportError('报告等待已达上限，将在后台重试。');
     const operation = invoke(this.cfg.executable, [
       ...(this.cfg.profile ? ['--profile', this.cfg.profile] : []), ...args, '--format', 'json',
     ], {
-      windowsHide: true, timeout: 180_000, maxBuffer: 64 * 1024 * 1024,
+      windowsHide: true, timeout: Math.min(90_000, remaining), maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, DWS_CONFIG_DIR: resolve(this.cfg.configDir),
         DWS_CACHE_DIR: join(this.directory, 'dws-cache'), DWS_NO_SKILLS: '1' },
     });
@@ -116,7 +125,7 @@ export class DingTalkReports {
       const failure = error as { code?: string | number; stdout?: string; stderr?: string };
       let category = '';
       try { const data = JSON.parse(failure.stdout || failure.stderr || '{}'); category = [data.error?.category, data.error?.reason].filter(value => typeof value === 'string' && /^[a-z_]+$/.test(value)).join('/'); } catch {}
-      throw new Error(`钉钉文档命令 ${args.slice(0, 2).join(' ')} 未成功执行（${failure.code ?? 'unknown'}${category ? ': ' + category : ''}），请检查文档授权和权限。`);
+      throw new ReportError(`钉钉文档命令 ${args.slice(0, 2).join(' ')} 未成功执行（${failure.code ?? 'unknown'}${category ? ': ' + category : ''}）。`, !/auth|permission|forbidden|invalid_argument/.test(category));
     }
     let result: DwsResult | undefined;
     // Long writes can print progress before the final JSON object.
@@ -124,9 +133,21 @@ export class DingTalkReports {
       try { result = JSON.parse(stdout.slice(match.index)) as DwsResult; break; }
       catch { /* Keep looking for the final JSON result. */ }
     }
-    if (!result) throw new Error('钉钉文档命令返回了无法解析的结果。');
-    if (result.success !== true && !(args[1] === 'read' && args.includes('jsonml') && Array.isArray(result.jsonml))) throw new Error('钉钉未确认文档操作成功，请检查文档授权和权限。');
+    if (!result) throw new ReportError('钉钉文档命令返回了无法解析的结果。');
+    if (result.success !== true && !(args[1] === 'read' && args.includes('jsonml') && Array.isArray(result.jsonml))) throw new ReportError('钉钉未确认文档操作成功。');
     return result;
+  }
+
+  private async retry<T>(operation: () => Promise<T>, deadlineAt: number): Promise<T> {
+    const delays = this.options.retryDelaysMs ?? [2000, 5000, 10000];
+    for (let attempt = 0; ; attempt++) {
+      if (Date.now() >= deadlineAt) throw new ReportError('报告等待已达上限，将在后台重试。');
+      try { return await operation(); }
+      catch (error) {
+        if (!(error instanceof ReportError) || !error.retryable || attempt >= delays.length || Date.now() + delays[attempt]! >= deadlineAt) throw error;
+        await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      }
+    }
   }
 
   private render(event: NotifyEvent, run: Run, language: UiLanguage): { markdown: string; checks: string[]; logChunks: string[] } {
@@ -161,7 +182,7 @@ export class DingTalkReports {
     return { markdown: sections.filter(Boolean).join('\n\n') + '\n', checks, logChunks };
   }
 
-  private async create(event: NotifyEvent, language: UiLanguage): Promise<string> {
+  private async create(event: NotifyEvent, language: UiLanguage, deadlineAt: number): Promise<string> {
     const directory = join(this.directory, `run-${event.runId}`);
     const receiptPath = join(directory, 'document.json');
     mkdirSync(directory, { recursive: true });
@@ -172,6 +193,7 @@ export class DingTalkReports {
       if (!url) throw new Error('已保存的报告链接无效。');
       return url;
     }
+    if (Date.now() >= deadlineAt) throw new ReportError('报告排队等待已达上限，将在后台重试。');
     if (receipt?.state === 'creating') {
       throw new Error('报告上次创建结果尚未核实，请检查报告目录里的创建记录。');
     }
@@ -192,7 +214,7 @@ export class DingTalkReports {
       save({ state: 'creating' });
       const created = await this.call(['doc', 'create', '--name',
         `Runember · ${event.project.name} · ${language === 'en' ? 'Task' : '任务'} ${event.task.id} · Run ${run.id}`,
-        ...(this.cfg.folder ? ['--folder', this.cfg.folder] : [])]);
+        ...(this.cfg.folder ? ['--folder', this.cfg.folder] : [])], deadlineAt);
       const nodeId = created.nodeId ?? created.serverResponse?.nodeId;
       const url = docUrl(created.docUrl ?? created.serverResponse?.docUrl);
       if (!nodeId || !url) throw new Error('钉钉创建报告后未返回有效的节点和链接。');
@@ -200,21 +222,30 @@ export class DingTalkReports {
     }
     const nodeId = receipt!.nodeId!;
     const url = receipt!.url!;
+    if (!docUrl(url)) throw new Error('已保存的报告链接无效。');
+    const contentHash = createHash('sha256').update(markdown).digest('hex');
     // Overwrite is limited to the report node created and persisted above.
-    const updated = await this.call(['doc', 'update', '--node', nodeId, '--content-file', reportFile,
-      '--mode', 'overwrite', '--yes']);
-    if (updated.degradations?.length) console.warn(`[dingtalk-report] Run #${run.id} 报告长内容已分块排版。`);
-    const readback = await this.call(['doc', 'read', '--node', nodeId]);
-    const text = readback.markdown;
-    const normalized = text?.replace(/\r\n/g, '\n');
-    if (typeof normalized !== 'string' || !checks.every(line => normalized.includes(line))) {
-      throw new Error('钉钉报告回读未通过完整性检查，保留本地报告供重试。');
+    if (receipt?.state !== 'verifying' || receipt.contentHash !== contentHash) {
+      const updated = await this.retry(() => this.call(['doc', 'update', '--node', nodeId, '--content-file', reportFile,
+        '--mode', 'overwrite', '--yes'], deadlineAt), deadlineAt);
+      if (updated.degradations?.length) console.warn(`[dingtalk-report] Run #${run.id} 报告长内容已分块排版。`);
+      save({ state: 'verifying', nodeId, url, contentHash });
     }
+    await this.retry(async () => {
+      const readback = await this.call(['doc', 'read', '--node', nodeId], deadlineAt);
+      const normalized = readback.markdown?.replace(/\r\n/g, '\n');
+      if (typeof normalized !== 'string' || !checks.every(line => normalized.includes(line))) throw new ReportError('钉钉报告回读未通过完整性检查，保留本地报告供重试。');
+    }, deadlineAt);
     // Markdown import/export may insert whitespace even inside code. Native code attributes
     // preserve the exact log bytes; repair only this generated document under a revision guard.
-    let native = await this.call(['doc', 'read', '--node', nodeId, '--content-format', 'jsonml']);
+    const readNative = () => this.retry(async () => {
+      const value = await this.call(['doc', 'read', '--node', nodeId, '--content-format', 'jsonml'], deadlineAt);
+      if (documentLogBlocks(value.jsonml, language).length !== logChunks.length) throw new ReportError('钉钉报告日志分段数量不一致，保留本地报告供重试。');
+      return value;
+    }, deadlineAt);
+    let native = await readNative();
     let blocks = documentLogBlocks(native.jsonml, language);
-    if (blocks.length !== logChunks.length) throw new Error('钉钉报告日志分段数量不一致，保留本地报告供重试。');
+    if (blocks.length !== logChunks.length) throw new ReportError('钉钉报告日志分段数量不一致，保留本地报告供重试。');
     if (blocks.some((block, index) => block[1].code !== logChunks[index])) {
       blocks.forEach((block, index) => {
         block[1].code = logChunks[index];
@@ -224,8 +255,8 @@ export class DingTalkReports {
       writeFileSync(nativeFile, JSON.stringify(native.jsonml), { mode: 0o600 });
       if (!Number.isSafeInteger(native.revision)) throw new Error('钉钉报告缺少版本号，无法安全修复日志格式。');
       await this.call(['doc', 'update', '--node', nodeId, '--content-format', 'jsonml', '--content-file', nativeFile,
-        '--revision', String(native.revision), '--mode', 'overwrite', '--yes']);
-      native = await this.call(['doc', 'read', '--node', nodeId, '--content-format', 'jsonml']);
+        '--revision', String(native.revision), '--mode', 'overwrite', '--yes'], deadlineAt);
+      native = await readNative();
       blocks = documentLogBlocks(native.jsonml, language);
     }
     if (blocks.length !== logChunks.length || blocks.some((block, index) => block[1].code !== logChunks[index])) {

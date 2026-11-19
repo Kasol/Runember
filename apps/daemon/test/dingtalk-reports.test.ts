@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { runDetails, type NotifyEvent } from '@agentdesk/core';
 import { DingTalkAppNotifier } from '../src/dingtalk-app.js';
-import { DingTalkReports, reportLogChunks } from '../src/dingtalk-reports.js';
+import { DingTalkReports, ReportError, reportLogChunks } from '../src/dingtalk-reports.js';
 import { EventBus } from '../src/notify.js';
 import { Store } from '../src/store.js';
 import { loadConfig } from '../src/config.js';
@@ -47,7 +47,7 @@ test('a report retains the full Run log and reuses its document across retries a
   };
   const config = { executable: 'fixture', configDir: join(dir, 'auth') };
   const url = 'https://alidocs.dingtalk.com/i/nodes/fixture';
-  const publisher = new DingTalkReports(config, store, dir);
+  const publisher = new DingTalkReports(config, store, dir, { retryDelaysMs: [1, 1, 1] });
   const calls: string[] = [];
   let report = '';
   let valid = false;
@@ -76,7 +76,8 @@ test('a report retains the full Run log and reuses its document across retries a
   assert.ok(report.includes(task.prompt));
   valid = true;
   assert.equal(await publisher.publish(event), url);
-  assert.deepEqual(calls, ['create', 'update', 'read', 'update', 'read', 'read', 'update', 'read']);
+  assert.equal(calls.filter(x => x === 'create').length, 1);
+  assert.equal(calls.filter(x => x === 'update').length, 2); // One Markdown write and one native log repair.
   const restarted = new DingTalkReports(config, store, dir);
   assert.equal(await restarted.publish(event), url);
 });
@@ -111,7 +112,7 @@ test('notification sends the detail button after publishing and still delivers i
     { conversationId: 'fixture' }, async () => { throw Error('auth fixture'); });
   await fallback.notify({ ...event, runId: 2 });
   assert.equal(requests.at(-1)!.body.msgKey, 'sampleMarkdown');
-  assert.match(JSON.parse(requests.at(-1)!.body.msgParam as string).text, /详情报告暂未生成/);
+  assert.match(JSON.parse(requests.at(-1)!.body.msgParam as string).text, /详情报告暂不可用/);
 
   const english = new DingTalkAppNotifier('fixture', 'fixture', '', ['succeeded'],
     { conversationId: 'fixture' }, async (_event, language) => { assert.equal(language, 'en'); return url; }, () => 'en');
@@ -143,4 +144,42 @@ test('long physical log lines split losslessly without breaking Unicode or CRLF'
   const chunks = reportLogChunks(log);
   assert.equal(chunks.join(''), log);
   assert.ok(chunks.every(chunk => chunk.length <= 6000 && !/[\uD800-\uDBFF]$/.test(chunk)));
+});
+
+test('transient document reads are retried before the one final notification is sent', async t => {
+  const dir=mkdtempSync(join(tmpdir(),'report-read-retry-'));const store=new Store(dir);t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true})});
+  const project=store.addProject('fixture',dir,'codex'),task=store.addTask(project.id,'original prompt'),run=store.beginRun(task.id)!;
+  const log=join(dir,'run.log');writeFileSync(log,'full log\n');
+  store.finishRun(run.id,{status:'succeeded',exit_code:0,log_path:log,summary_json:JSON.stringify({agentMessage:'full answer',filesChanged:[],diffStat:''})},'done');
+  const event:NotifyEvent={kind:'run.succeeded',runId:run.id,task:store.getTask(task.id)!,project,summary:{filesChanged:[],diffStat:''}};
+  const report=new DingTalkReports({executable:'fixture',configDir:dir},store,dir,{retryDelaysMs:[1,1]});
+  let markdown='',reads=0,creates=0,writes=0;const messages:string[]=[];
+  t.mock.method(report as any,'call',async(args:string[])=>{
+    if(args[1]==='create'){creates++;return {success:true,nodeId:'fixture',docUrl:'https://alidocs.dingtalk.com/i/nodes/fixture'}}
+    if(args[1]==='update'){writes++;markdown=readFileSync(args[args.indexOf('--content-file')+1]!,'utf8');return {success:true}}
+    if(args.includes('jsonml'))return {jsonml:['root',{},['h2',{},['span',{},'完整 Run 日志']],['code',{code:'full log\n'}]],revision:1};
+    reads++;if(reads===1)throw new ReportError('doc read api/business_error');return {success:true,markdown};
+  });
+  t.mock.method(globalThis,'fetch',async(input:any,options:any)=>{
+    if(String(input).includes('accessToken'))return Response.json({accessToken:'fixture',expireIn:3600});
+    messages.push(JSON.parse(JSON.parse(options.body).msgParam).text);return Response.json({processQueryKey:'fixture'});
+  });
+  const notifier=new DingTalkAppNotifier('id','secret','',['succeeded'],{conversationId:'fixture'},report.publish);
+  await notifier.notify(event);
+  assert.equal(reads,2);assert.equal(creates,1);assert.equal(writes,1);assert.equal(messages.length,1);
+  assert.match(messages[0]!,/查看详情/);assert.doesNotMatch(messages[0]!,/暂不可用/);
+});
+
+test('an ambiguous create is never blindly repeated after restart', async t => {
+  const dir=mkdtempSync(join(tmpdir(),'report-create-ambiguous-'));const store=new Store(dir);t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true})});
+  const project=store.addProject('fixture',dir,'codex'),task=store.addTask(project.id,'prompt'),run=store.beginRun(task.id)!;
+  store.finishRun(run.id,{status:'succeeded',exit_code:0,summary_json:JSON.stringify({filesChanged:[],diffStat:''})},'done');
+  const event:NotifyEvent={kind:'run.succeeded',runId:run.id,task:store.getTask(task.id)!,project,summary:{filesChanged:[],diffStat:''}};
+  const config={executable:'fixture',configDir:dir};let creates=0;
+  const first=new DingTalkReports(config,store,dir);
+  t.mock.method(first as any,'call',async()=>{creates++;throw Error('Connection lost after create request')});
+  await assert.rejects(first.publish(event));
+  const restored=new DingTalkReports(config,store,dir);
+  t.mock.method(restored as any,'call',async()=>{creates++;throw Error('Must not create again')});
+  await assert.rejects(restored.publish(event),/创建结果尚未核实/);assert.equal(creates,1);
 });

@@ -538,6 +538,9 @@ export type NotifyEvent = { runId: number; details?: RunDetails; actions?: TaskA
 export interface Notifier {
   readonly name: string;
   notify(event: NotifyEvent): Promise<void>;
+  start?(): void;
+  stop?(): void;
+  drain?(): Promise<void>;
   retryReport?(runId: number): number;
 }
 
