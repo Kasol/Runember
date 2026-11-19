@@ -7,6 +7,7 @@
  */
 
 // ─────────────────────────── 领域类型 ───────────────────────────
+import { reasoningLabel } from './reasoning.js';
 
 export type AgentId = string;
 export function agentLabel(id?: string | null): string {
@@ -48,6 +49,8 @@ export type BlockedKind =
  */
 export type ExecutionMode = 'capability' | 'isolation';
 
+export * from './reasoning.js';
+
 export interface Project {
   id: number;
   name: string;
@@ -56,6 +59,7 @@ export interface Project {
   agent_id: AgentId;
   /** 项目默认模型；空值沿用执行器配置。 */
   model?: string | null;
+  reasoning_effort?: string | null;
   /** 执行模式，默认 capability */
   execution?: ExecutionMode;
   /** 隔离模式专用：项目级系统依赖（预装进项目专属镜像） */
@@ -81,6 +85,7 @@ export interface Task {
   /** 创建时保存的执行配置，续跑使用同一执行器。旧记录按 Codex 兼容。 */
   agent_id?: AgentId | null;
   model?: string | null;
+  reasoning_effort?: string | null;
   execution?: ExecutionMode | null;
   prompt: string;
   status: TaskStatus;
@@ -96,6 +101,7 @@ export interface Run {
   task_id: number;
   agent_id?: AgentId | null;
   model?: string | null;
+  reasoning_effort?: string | null;
   kind: 'normal' | 'resume';
   /** adapter 会话 id（codex thread id），续跑的钥匙 */
   session_id?: string;
@@ -172,6 +178,7 @@ export interface RunDetails {
   id: number;
   agentId?: AgentId;
   model?: string;
+  reasoningEffort?: string | null;
   elapsedMs?: number;
   stage: string;
   exitCode?: number;
@@ -318,7 +325,8 @@ export function runDetails(run: Run, agentId?: AgentId, remaining?: string | nul
     verification_failed: '本轮记录的验收未通过。',
   } as Partial<Record<BlockedKind, string>>)[run.blocked_kind ?? 'unknown_error'];
   return {
-    id: run.id, agentId: run.agent_id ?? nonBlank(summary?.agentId) ?? agentId, model: nonBlank(summary?.model) ?? run.model ?? undefined, stage: runStage(run),
+    id: run.id, agentId: run.agent_id ?? nonBlank(summary?.agentId) ?? agentId, model: nonBlank(summary?.model) ?? run.model ?? undefined,
+    reasoningEffort: run.reasoning_effort ?? null, stage: runStage(run),
     exitCode: run.exit_code === -1 ? undefined : run.exit_code ?? undefined,
     elapsedMs: Number.isFinite(ended - started) ? Math.max(0, ended - started) : undefined,
     summary: text, diagnostic: nonBlank(summary?.diagnostic), confirmation: runInputRequest(run, summary), blocker,
@@ -344,11 +352,11 @@ export function runTiming(details: RunDetails, language: UiLanguage = 'zh-CN'): 
     };
     const elapsed = details.elapsedMs === undefined ? '' : ` · ${(details.elapsedMs / 1000).toFixed(1)} seconds`;
     const exit = details.exitCode === undefined ? '' : ` · Exit code ${details.exitCode}`;
-    return `Run #${details.id} · ${details.agentId ?? 'Agent not recorded'}${details.model ? ' / ' + details.model : ''} · ${stages[details.stage] ?? details.stage}${exit}${elapsed}`;
+    return `Run #${details.id} · ${details.agentId ?? 'Agent not recorded'}${details.model ? ' / ' + details.model : ''}${details.reasoningEffort ? ' · ' + reasoningLabel(details.reasoningEffort, language) : ''} · ${stages[details.stage] ?? details.stage}${exit}${elapsed}`;
   }
   const elapsed = details.elapsedMs === undefined ? '' : ` · 耗时 ${(details.elapsedMs / 1000).toFixed(1)} 秒`;
   const exit = details.exitCode === undefined ? '' : ` · 退出码 ${details.exitCode}`;
-  return `Run #${details.id} · ${details.agentId ?? 'Agent 未记录'}${details.model ? ' / ' + details.model : ''} · ${details.stage}${exit}${elapsed}`;
+  return `Run #${details.id} · ${details.agentId ?? 'Agent 未记录'}${details.model ? ' / ' + details.model : ''}${details.reasoningEffort ? ' · ' + reasoningLabel(details.reasoningEffort) : ''} · ${details.stage}${exit}${elapsed}`;
 }
 
 // ─────────────────────────── 状态机与分类（纯函数） ───────────────────────────
@@ -421,9 +429,9 @@ export interface AgentAdapter {
   /** 可选的最终答复结构，由适配器映射为通用事件。 */
   finalResponseSchema?: object;
   /** 正常任务的命令 */
-  buildArgs(prompt: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string): string[];
+  buildArgs(prompt: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string, reasoningEffort?: string): string[];
   /** 续跑命令：恢复会话并传递用户反馈 */
-  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string): string[];
+  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode, finalResponseSchemaPath?: string, model?: string, reasoningEffort?: string): string[];
   /** 单行事件解析：返回 null 表示该行不是关心的 JSONL 事件 */
   parseLine(line: string, structuredResponse?: boolean): AdapterEvent | null;
   /** 启动前凭证自检命令（如 test -f auth.json），exit 0 为通过 */

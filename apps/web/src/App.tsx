@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, client, setApiToken, taskStatusMeta, type Project, type Task, type ProjectFolder } from './api';
-import { agentLabel, readRunSummary, runStage, runTiming, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
+import { agentLabel, readRunSummary, runStage, runTiming, reasoningLabel, TASK_STATE_LABELS, type TaskState } from '@agentdesk/core';
 import { Modal, Labeled, FormActions } from './ui';
 import { ProjectFolderPicker } from './ProjectFolderPicker';
 import { RunLogViewer } from './RunLogViewer';
@@ -146,7 +146,7 @@ export default function App() {
 
       <div className="toolbar project-task-tools" data-guide="new-task">
         <NewTask key={selected} project={currentProject} onCreated={() => void refresh()} />
-        {currentProject ? <span className="task-project-context">{currentProject.name} · Agent：{agentLabel(currentProject.agent_id)} · {currentProject.model || '默认模型'}</span>
+        {currentProject ? <span className="task-project-context">{currentProject.name} · Agent：{agentLabel(currentProject.agent_id)} · {currentProject.model || '默认模型'} · {reasoningLabel(currentProject.reasoning_effort)}</span>
           : <span className="task-project-context">先选择一个项目，再新建任务</span>}
       </div>
       {showSetup && <SetupPanel onClose={() => setShowSetup(false)} />}
@@ -266,7 +266,7 @@ function ProjectStrip(props: {
                 {cnt && <span className="mini-count">{cnt}</span>}
               </div>
               <div className="proj-card-name">{p.name}</div>
-              <div className="agent-info">{agentLabel(p.agent_id)} · {p.model || '默认模型'}</div>
+              <div className="agent-info">{agentLabel(p.agent_id)} · {p.model || '默认模型'} · {reasoningLabel(p.reasoning_effort)}</div>
               <div className="proj-card-path">{p.workspace_path}</div>
               <div className="proj-card-actions" onClick={e => e.stopPropagation()}>
                 <button title="修改 Agent 与模型" onClick={() => setEditingAgent(p)}>Agent 设置</button>
@@ -303,6 +303,7 @@ function AddProject(props: { onCreated: () => void }) {
   const [execution, setExecution] = useState<'capability' | 'isolation'>('capability');
   const [agent, setAgent] = useState('codex');
   const [model, setModel] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
@@ -311,7 +312,7 @@ function AddProject(props: { onCreated: () => void }) {
     setBusy(true);
     setMsg('');
     try {
-      await client.createProject(name.trim(), folder.path, agent, execution, model.trim() || null);
+      await client.createProject(name.trim(), folder.path, agent, execution, model.trim() || null, reasoningEffort || null);
       props.onCreated();
     } catch (e: any) { setMsg(e?.message ?? '注册失败'); }
     setBusy(false);
@@ -336,7 +337,7 @@ function AddProject(props: { onCreated: () => void }) {
         {folder && <p className="folder-path">{folder.path}</p>}
         <button disabled={busy} onClick={() => setShowFolders(true)}>{folder ? '更换文件夹' : '选择文件夹'}</button>
       </Labeled>
-      <AgentFields agent={agent} model={model} disabled={busy} onAgent={value => {
+      <AgentFields agent={agent} model={model} reasoningEffort={reasoningEffort} onReasoningEffort={setReasoningEffort} disabled={busy} onAgent={value => {
         setAgent(value); if (value !== 'codex') setExecution('capability');
       }} onModel={setModel} />
       <Labeled label="执行模式">
@@ -371,19 +372,20 @@ function Column(props: { title: string; tone: string; empty: string | null; chil
 function ProjectAgentSettings({ project, onClose, onSaved }: { project: Project; onClose: () => void; onSaved: () => void }) {
   const [agent, setAgent] = useState(project.agent_id);
   const [model, setModel] = useState(project.model ?? '');
+  const [reasoningEffort, setReasoningEffort] = useState(project.reasoning_effort ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const save = async () => {
     setBusy(true); setError('');
     try {
-      await client.updateProject(project.id, { agent_id: agent, model: model.trim() || null,
+      await client.updateProject(project.id, { agent_id: agent, model: model.trim() || null, reasoning_effort: reasoningEffort || null,
         ...(agent !== 'codex' ? { execution: 'capability' } : {}) });
       onSaved();
     } catch (e) { setError((e as Error).message); setBusy(false); }
   };
   return <Modal title={`${project.name} · Agent 设置`} onClose={onClose}>
-    <AgentFields agent={agent} model={model} onAgent={setAgent} onModel={setModel} disabled={busy} />
-    <p className="dim">保存后新建的任务使用此配置。已有任务和草稿保留创建时的 Agent 与模型，续跑仍恢复原会话。</p>
+    <AgentFields agent={agent} model={model} reasoningEffort={reasoningEffort} onReasoningEffort={setReasoningEffort} onAgent={setAgent} onModel={setModel} disabled={busy} />
+    <p className="dim">保存后新建的任务使用此配置。已有任务和草稿保留创建时的 Agent、模型与推理强度，续跑仍恢复原会话。</p>
     {error && <p className="form-err" role="alert">{error}</p>}
     <FormActions primary="保存" onPrimary={() => void save()} disabled={busy} secondary="取消" onSecondary={onClose} />
   </Modal>;
@@ -399,7 +401,7 @@ function Card(props: {
         <span className="badge" style={{ color: meta.color, background: meta.bg }}>{meta.label}</span>
         <span className="pid">#{props.task.id} · {props.project}</span>
       </div>
-      <div className="agent-info">{agentLabel(props.task.agent_id)} · {props.task.model || '默认模型'}</div>
+      <div className="agent-info">{agentLabel(props.task.agent_id)} · {props.task.model || '默认模型'} · {reasoningLabel(props.task.reasoning_effort)}</div>
       <div className="prompt">{props.task.prompt}</div>
       {props.task.confirmation && <p className="confirmation-preview">{props.task.confirmation}</p>}
       {props.actions && (
@@ -429,7 +431,7 @@ function DraftCard(props: {
         <button onClick={props.onOpen}>查看详情</button>
         <span className="pid">#{t.id} · {props.project}</span>
       </div>
-      <div className="agent-info">{agentLabel(t.agent_id)} · {t.model || '默认模型'}</div>
+      <div className="agent-info">{agentLabel(t.agent_id)} · {t.model || '默认模型'} · {reasoningLabel(t.reasoning_effort)}</div>
       {editing ? (
         <>
           <textarea className="draft-edit" value={text} onChange={e => setText(e.target.value)} rows={3} />
@@ -496,6 +498,7 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
       {!task && !error && <p>正在读取任务…</p>}
       {task?.confirmation && <dl className="confirmation"><dt>请确认</dt><dd>{task.confirmation}</dd></dl>}
       {details ? <p className="run-facts">{runTiming(details)}</p> : data?.agentId && <p className="run-facts">Agent · {data.agentId}</p>}
+      {(details || task) && !details?.reasoningEffort && <p className="dim">{reasoningLabel(details ? details.reasoningEffort : task?.reasoning_effort)}</p>}
       {details?.cancellationRequestedAt && <dl className="run-details">
         <dt>请求取消</dt><dd>{new Date(details.cancellationRequestedAt).toLocaleString()}</dd>
         {details.stoppedAt && <><dt>执行器停止</dt><dd>{new Date(details.stoppedAt).toLocaleString()}</dd></>}
@@ -553,7 +556,7 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
         <b>Run 历史</b>
         {runs.map(r => (
           <div key={r.id} className="run-row">
-            Run #{r.id} · {agentLabel(r.agent_id ?? task?.agent_id)}{r.model ? ` / ${r.model}` : ''} · {r.kind === 'resume' ? '续跑' : '执行'} · {runStage(r)}
+            Run #{r.id} · {agentLabel(r.agent_id ?? task?.agent_id)}{r.model ? ` / ${r.model}` : ''} · {reasoningLabel(r.reasoning_effort)} · {r.kind === 'resume' ? '续跑' : '执行'} · {runStage(r)}
             {r.session_id && <span className="dim"> · session {r.session_id.slice(0, 8)}</span>}
             {r.log_path && <button aria-pressed={logRun?.id === r.id} onClick={() => setSelectedRunId(r.id)}>查看日志</button>}
             {r.checkpoint_sha && <p className="dim">Git checkpoint <code>{r.checkpoint_sha}</code></p>}
@@ -590,7 +593,7 @@ function NewTask(props: { project?: Project; onCreated: () => void }) {
   }
   return (
     <Modal title="📝 新建任务" onClose={() => setOpen(false)}>
-      <div className="new-task-context"><strong>{project?.name}</strong><span>Agent · {agentLabel(project?.agent_id)} · {project?.model || '默认模型'}</span></div>
+      <div className="new-task-context"><strong>{project?.name}</strong><span>Agent · {agentLabel(project?.agent_id)} · {project?.model || '默认模型'} · {reasoningLabel(project?.reasoning_effort)}</span></div>
       <Labeled label="任务描述">
         <textarea
           placeholder="描述要执行的任务"

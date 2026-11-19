@@ -28,6 +28,12 @@ Mac 日志路径示例：`/Users/你的用户名/Library/Logs/Runember`，请按
 
 在项目的 Agent 设置中选择执行器和可选模型。留空沿用 Agent 当前配置。任务创建时保存绑定；修改项目配置不会把历史任务切换到另一种 Agent。
 
+「推理强度」默认沿用 Agent 配置，可按当前模型支持的选项单独指定。Codex 从本机模型缓存读取选项，ZCode 从模型规则读取选项，DeepSeek Harness 的原生官方模型支持 `off / low / high / max`。未知模型或未提供能力信息时仅可沿用 Agent 配置。切换 Agent 或模型后重新选择强度，Runember 不再替 ZCode 自动选择高强度。
+
+强度只覆盖本轮执行，不修改 Agent 的全局设置。新建任务和草稿保存当时的选择，重试、续跑沿用原任务的选择；项目设置只影响后续创建的任务。任务详情、Run 历史、CLI 和钉钉运行信息展示已指定的强度；「沿用 Agent 配置」不代表 Runember 已观测到模型实际采用的强度。
+
+CLI 可用 `runember project set 项目名 --reasoning-effort high` 指定，`--reasoning-effort auto` 恢复沿用 Agent 配置。可以通过 `GET /api/agents/Agent编号/reasoning?model=模型` 查看可选值，接口字段为 `reasoning_effort`，空值表示沿用。
+
 登录、供应商、MCP 和 Skill 由对应 Agent 管理。Runember 自动发现安装位置，并允许手动指定 CLI 路径。ZCode 内置 CLI 的供应商文件路径会由适配器传入，无需给每条任务添加启动提示词。
 
 ## 网络代理

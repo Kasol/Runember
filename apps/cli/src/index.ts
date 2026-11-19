@@ -9,7 +9,7 @@
  *   retry <taskId> / cancel <taskId>
  *   auth [codex]
  */
-import { agentLabel, runStage, runTiming, taskStateLabel, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
+import { agentLabel, runStage, runTiming, reasoningLabel, taskStateLabel, type TaskView, type Project, type Run, type RunDetails, type TaskActions } from '@agentdesk/core';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -74,11 +74,11 @@ async function main(): Promise<void> {
       const [sub] = rest;
       if (sub === 'list') {
         const { projects } = await api('GET', '/api/projects') as { projects: Project[] };
-        for (const p of projects) console.log(`#${p.id} ${p.name} [${p.execution ?? 'capability'}] ${agentLabel(p.agent_id)} / ${p.model || '默认模型'} · ${p.workspace_path}`);
+        for (const p of projects) console.log(`#${p.id} ${p.name} [${p.execution ?? 'capability'}] ${agentLabel(p.agent_id)} / ${p.model || '默认模型'} · ${reasoningLabel(p.reasoning_effort)} · ${p.workspace_path}`);
         return;
       }
       const { values, positionals } = parseArgs({ args: rest.slice(1), allowPositionals: true,
-        options: { agent: { type: 'string' }, model: { type: 'string' }, execution: { type: 'string' } } });
+        options: { agent: { type: 'string' }, model: { type: 'string' }, 'reasoning-effort': { type: 'string' }, execution: { type: 'string' } } });
       const [name, path] = positionals;
       if (sub === 'set' && name) {
         const { projects } = await api('GET', '/api/projects') as { projects: Project[] };
@@ -87,17 +87,19 @@ async function main(): Promise<void> {
         const { project } = await api('PATCH', `/api/projects/${p.id}`, {
           ...(values.agent && { agent_id: values.agent }),
           ...(values.model !== undefined && { model: values.model.trim() || null }),
+          ...(values['reasoning-effort'] !== undefined && { reasoning_effort: values['reasoning-effort'] === 'auto' ? null : values['reasoning-effort'] }),
           ...(values.execution && { execution: values.execution }),
         });
-        console.log(`✅ ${project.name} · ${agentLabel(project.agent_id)} / ${project.model || '默认模型'}`);
+        console.log(`✅ ${project.name} · ${agentLabel(project.agent_id)} / ${project.model || '默认模型'} · ${reasoningLabel(project.reasoning_effort)}`);
         return;
       }
       if (sub !== 'add' || !name || !path || positionals.length !== 2) {
-        console.log('用法: desk project list | project add <名称> <绝对路径> [--agent codex|zcode|deepseek] [--model 模型] | project set <名称> [--agent ...] [--model ...]');
+        console.log('用法: desk project list | project add <名称> <绝对路径> [--agent codex|zcode|deepseek] [--model 模型] [--reasoning-effort 强度|auto] | project set <名称> [--agent ...] [--model ...] [--reasoning-effort 强度|auto]');
         return;
       }
       const agent_id = values.agent ?? 'codex';
-      const { project } = await api('POST', '/api/projects', { name, workspace_path: path, agent_id, model: values.model?.trim() || null, execution: values.execution ?? 'capability' });
+      const { project } = await api('POST', '/api/projects', { name, workspace_path: path, agent_id, model: values.model?.trim() || null,
+        reasoning_effort: values['reasoning-effort'] === 'auto' ? null : values['reasoning-effort'], execution: values.execution ?? 'capability' });
       console.log(`✅ 项目已注册 #${project.id} ${project.name} → ${project.workspace_path} (agent: ${project.agent_id})`);
       return;
     }
@@ -185,13 +187,14 @@ async function main(): Promise<void> {
           if (details.summary) console.log(`\nAgent 最终答复\n${details.summary}`);
         } else if (agentId) {
           console.log(`Agent · ${agentLabel(agentId)}${task.model ? ' / ' + task.model : ''}`);
+          console.log(reasoningLabel(task.reasoning_effort));
         }
         console.log(`\n任务描述\n${task.prompt}`);
         if (actions.resume) console.log(`${actions.resume === 'session' ? '续跑原会话' : '以新会话继续'} · desk resume ${id} [说明]`);
         if (actions.retry) console.log(`${merge ? '核对并继续合并' : '重试（新会话）'} · desk retry ${id}`);
         if (merge?.repo && merge.pr) console.log(`  PR https://github.com/${merge.repo}/pull/${merge.pr}`);
         for (const r of runs) {
-          console.log(`  Run #${r.id} · ${agentLabel(r.agent_id ?? task.agent_id)}${r.model ? ' / ' + r.model : ''} · ${r.kind === 'resume' ? '续跑' : '执行'} · ${runStage(r)}` +
+          console.log(`  Run #${r.id} · ${agentLabel(r.agent_id ?? task.agent_id)}${r.model ? ' / ' + r.model : ''} · ${reasoningLabel(r.reasoning_effort)} · ${r.kind === 'resume' ? '续跑' : '执行'} · ${runStage(r)}` +
             `${r.session_id ? ' session=' + r.session_id.slice(0, 8) : ''}`);
           if (r.checkpoint_sha) console.log(`    Git checkpoint ${r.checkpoint_sha}`);
           if (r.log_path) console.log(`    完整日志 · ${r.log_path}`);

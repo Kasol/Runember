@@ -1,7 +1,7 @@
 /** 前端共享类型与 API 客户端（与 daemon REST 一一对应） */
 
 import { taskStateLabel, type Project, type TaskView, type Run, type RunDetails, type TaskActions, type TaskState, type LanguagePreference } from '@agentdesk/core';
-import type { DiagnosticReport, EnvironmentCheck } from '@agentdesk/core';
+import type { DiagnosticReport, EnvironmentCheck, ReasoningOption } from '@agentdesk/core';
 export type { Project, TaskView as Task, Run } from '@agentdesk/core';
 
 export interface MergeStatus {
@@ -15,7 +15,7 @@ export interface ProjectFolder { name: string; path: string }
 export interface LogSettings { currentDir: string; configuredDir: string; dataDir: string; restartRequired: boolean }
 export interface AgentInfo {
   id: string; label: string; available: boolean; modes: string[];
-  models: Array<{ id: string; label: string }>; defaultModel?: string;
+  models: Array<{ id: string; label: string; reasoningOptions?: ReasoningOption[] }>; defaultModel?: string;
   executable?: string; command?: string[]; configuredPath?: string; detectedPaths: string[];
 }
 
@@ -64,9 +64,10 @@ export const client = {
   projectFolders: (path?: string) => api<ProjectFolderListing>('POST', '/api/project-folders', { path }),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number }) =>
     api<{ ok: boolean }>('POST', `/api/tasks/${id}/draft`, { op, ...extra }),
-  createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability', model?: string | null) =>
-    api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id, execution, model }),
-  updateProject: (id: number, body: { agent_id?: string; model?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }) =>
+  reasoningOptions: (agent: string, model: string) => api<{ model?: string; options: ReasoningOption[] }>('GET', `/api/agents/${encodeURIComponent(agent)}/reasoning?model=${encodeURIComponent(model)}`),
+  createProject: (name: string, workspace_path: string, agent_id = 'codex', execution = 'capability', model?: string | null, reasoning_effort?: string | null) =>
+    api<{ project: Project }>('POST', '/api/projects', { name, workspace_path, agent_id, execution, model, reasoning_effort }),
+  updateProject: (id: number, body: { agent_id?: string; model?: string | null; reasoning_effort?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }) =>
     api<{ project: Project }>('PATCH', `/api/projects/${id}`, body),
   recheckProject: (id: number) =>
     api<{ report: Array<EnvironmentCheck & { name: string; detail: string }> }>('POST', `/api/projects/${id}/recheck`),

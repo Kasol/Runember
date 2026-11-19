@@ -8,6 +8,7 @@ import { agentDefinitions } from '@agentdesk/adapters';
 import type { Store } from './store.js';
 import type { AppConfig } from './config.js';
 import { zcodeBridgeMain } from './zcode-bridge.js';
+import { reasoningOption, type ReasoningOption } from '@agentdesk/core';
 
 interface NativeAgent { command: string[]; env: string[]; executable: string }
 
@@ -126,8 +127,49 @@ function deepseekSelection(): { provider: string; model: string } {
 
 export interface AgentInfo {
   id: string; label: string; available: boolean; modes: readonly string[];
-  models: Array<{ id: string; label: string }>; defaultModel?: string;
+  models: Array<{ id: string; label: string; reasoningOptions?: ReasoningOption[] }>; defaultModel?: string;
   executable?: string; command?: string[]; configuredPath?: string; detectedPaths: string[];
+}
+
+/** Last matching ZCode model rule supplies its option schema, including non-thinking models. */
+export function zcodeReasoningOptions(config: any, model: string): ReasoningOption[] {
+  let values: unknown;
+  for (const rule of config?.modelConfigRules?.modelRules ?? []) {
+    try { if (new RegExp(rule.modelMatch, 'i').test(model)) values = rule.config?.optionSpecs?.reasoningLevel?.values; } catch {}
+  }
+  return reasoningValues(values);
+}
+
+function reasoningValues(values: unknown): ReasoningOption[] {
+  return Array.isArray(values) ? [...new Set(values.filter((v): v is string => typeof v === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(v)))].map(reasoningOption) : [];
+}
+
+/** Native dsh-llm-deepseek protocol. Custom providers need their own capability declaration. */
+export function deepseekReasoningOptions(model: string): ReasoningOption[] {
+  return /^(?:deepseek-account|deepseek-official)\/(?:deepseek-flash|deepseek-v4-pro)$/.test(model)
+    ? ['off', 'low', 'high', 'max'].map(reasoningOption) : [];
+}
+
+export function validateReasoningEffort(cfg: AppConfig, agentId: string, model: string | null | undefined, value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(value)) throw new Error('推理强度必须从当前模型支持的选项中选择，或设为空值沿用 Agent 配置。');
+  const choices = reasoningCapabilities(cfg, agentId, model).options;
+  if (!choices.some(option => option.id === value)) throw new Error(`当前 Agent / 模型未提供推理强度「${value}」，请选择支持的选项或沿用 Agent 配置。`);
+  return value;
+}
+
+export function reasoningCapabilities(cfg: AppConfig, agentId: string, model?: string | null): { model?: string; options: ReasoningOption[] } {
+  const agent = agentCatalog(cfg).find(item => item.id === agentId);
+  const selected = model || agent?.defaultModel;
+  const options = !selected ? [] : agentId === 'zcode' ? zcodeReasoningOptions(zcodeBuiltin(cfg), selected.split('/').slice(1).join('/'))
+    : agentId === 'deepseek' ? deepseekReasoningOptions(selected)
+      : agent?.models.find(item => item.id === selected)?.reasoningOptions ?? [];
+  return { model: selected, options };
+}
+
+function zcodeBuiltin(cfg: AppConfig): any {
+  const script = findNativeAgent('zcode', cfg)?.command.find(path => /zcode\.cjs$/i.test(path));
+  return readJson(process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE || (script ? join(dirname(script), '..', 'config', 'provider', 'zcode-builtin.json') : ''))?.config;
 }
 
 export function agentCatalog(cfg: AppConfig): AgentInfo[] {
@@ -138,24 +180,29 @@ export function agentCatalog(cfg: AppConfig): AgentInfo[] {
     if (definition.id === 'codex') {
       try { const config = parseToml(readFileSync(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml'), 'utf8')); defaultModel = typeof config.model === 'string' ? config.model : undefined; } catch {}
       const cached = readJson(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'models_cache.json'));
-      for (const model of cached?.models ?? []) if (typeof model.slug === 'string') models.push({ id: model.slug, label: model.display_name ?? model.slug });
+      for (const model of cached?.models ?? []) if (typeof model.slug === 'string') models.push({ id: model.slug, label: model.display_name ?? model.slug,
+        reasoningOptions: reasoningValues(model.supported_reasoning_levels?.map((level: any) => level?.effort)) });
     } else if (definition.id === 'deepseek') {
       const selected = deepseekSelection(); defaultModel = `${selected.provider}/${selected.model}`;
-      models.push({ id: defaultModel, label: defaultModel });
+      for (const model of [defaultModel, ...['deepseek-flash', 'deepseek-v4-pro'].map(id => `${selected.provider}/${id}`)]) {
+        models.push({ id: model, label: model, reasoningOptions: deepseekReasoningOptions(model) });
+      }
     } else {
       const personal = readJson(process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE || join(process.env.ZCODE_DATA_BASE_DIR || homedir(), '.zcode', 'v2', 'provider_config.json'))?.config;
       const script = runtime?.command.find(path => /zcode\.cjs$/i.test(path));
-      const builtin = script && readJson(join(dirname(script), '..', 'config', 'provider', 'zcode-builtin.json'))?.config;
+      const builtin = zcodeBuiltin(cfg);
       const providers = personal?.providerConfigRules?.providerRules ?? [];
       for (const provider of providers) {
         const template = builtin?.providerConfigRules?.templateRules?.find((template: any) => template.templateId === provider.templateId);
         const ids = [...(template?.config?.builtinModelIds ?? []), ...(provider.config?.personalModelIds ?? [])];
-        for (const model of ids) if (typeof model === 'string') models.push({ id: `${provider.providerId}/${model}`, label: `${provider.providerName ?? provider.providerId} / ${model}` });
+        for (const model of ids) if (typeof model === 'string') models.push({ id: `${provider.providerId}/${model}`, label: `${provider.providerName ?? provider.providerId} / ${model}`,
+          reasoningOptions: zcodeReasoningOptions(builtin, model) });
       }
       const selection = readJson(join(homedir(), '.zcode', 'cli', 'config.json'))?.modelSelection;
       if (selection?.providerId && selection?.modelId) defaultModel = `${selection.providerId}/${selection.modelId}`;
     }
-    if (defaultModel && !models.some(model => model.id === defaultModel)) models.unshift({ id: defaultModel, label: defaultModel });
+    if (defaultModel && !models.some(model => model.id === defaultModel)) models.unshift({ id: defaultModel, label: defaultModel,
+      reasoningOptions: definition.id === 'zcode' ? zcodeReasoningOptions(zcodeBuiltin(cfg), defaultModel.split('/').slice(1).join('/')) : [] });
     return { ...definition, available: !!runtime, executable: runtime?.executable, command: runtime?.command,
       configuredPath: cfg.agents[definition.id]?.executable ?? process.env[`AGENTDESK_${definition.id.toUpperCase()}_PATH`] ?? '',
       detectedPaths: detectedAgentPaths(definition.id).filter(executable => !!findNativeAgent(definition.id,
@@ -166,11 +213,12 @@ export function agentCatalog(cfg: AppConfig): AgentInfo[] {
 
 /** Per-run transport settings never modify the Agent's saved defaults or the prompt. */
 export function prepareNativeAgent(options: {
-  id: string; cmd: string[]; model?: string | null; cwd: string; runId: number; cfg: AppConfig;
+  id: string; cmd: string[]; model?: string | null; reasoningEffort?: string | null; cwd: string; runId: number; cfg: AppConfig;
 }): { cmd: string[]; env: string[]; cleanup: () => void } {
   const { id, cfg } = options;
   const native = findNativeAgent(id, cfg);
   if (!native) throw new Error(`宿主未发现 ${id} CLI。请安装对应客户端，或配置 agents.${id}.executable。`);
+  const reasoningEffort = validateReasoningEffort(cfg, id, options.model, options.reasoningEffort);
   const files: string[] = [];
   const root = join(cfg.logDir, 'agent-runtime');
   mkdirSync(root, { recursive: true });
@@ -184,6 +232,7 @@ export function prepareNativeAgent(options: {
       if (slash > 0) { selected.provider = options.model.slice(0, slash); selected.model = options.model.slice(slash + 1); }
       else selected.model = options.model;
     }
+    if (reasoningEffort) Object.assign(selected, { reasoningEffort });
     const patch = save('deepseek.yml', yaml([
       { id: 'credentials', disabled: false }, { id: 'authorization', disabled: false }, { id: 'deepseek-account', disabled: false },
       { id: 'agent-default-model', config: selected },
@@ -201,14 +250,9 @@ export function prepareNativeAgent(options: {
       if (!isFile(personalPath)) throw new Error('ZCode 供应商配置不存在，请先在 ZCode 客户端配置供应商并登录。');
       native.env.push(`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=${builtinPath}`, `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=${personalPath}`);
     }
-    const builtin = builtinPath && readJson(builtinPath)?.config;
-    let values: string[] | undefined;
-    for (const rule of builtin?.modelConfigRules?.modelRules ?? []) {
-      try { if (options.model && new RegExp(rule.modelMatch, 'i').test(options.model.split('/').slice(1).join('/')) && rule.config?.optionSpecs?.reasoningLevel?.values) values = rule.config.optionSpecs.reasoningLevel.values; } catch {}
-    }
-    const reasoningLevel = values?.includes('high') ? 'high' : values?.includes('enabled') ? 'enabled' : values?.at(-1);
-    const launch = save('zcode.json', JSON.stringify({ command: native.command, cwd: options.cwd, prompt: value('--prompt'), sessionId: value('--resume'), model: options.model || undefined,
-      ...(reasoningLevel && { modelOptions: { reasoningLevel } }) }));
+    const model = options.model || (reasoningEffort ? agentCatalog(cfg).find(item => item.id === id)?.defaultModel : undefined);
+    const launch = save('zcode.json', JSON.stringify({ command: native.command, cwd: options.cwd, prompt: value('--prompt'), sessionId: value('--resume'), model,
+      ...(reasoningEffort && { modelOptions: { reasoningLevel: reasoningEffort } }) }));
     cmd = [process.execPath, bridge, launch];
   }
   return { cmd, env: native.env, cleanup: () => { for (const path of files) { try { unlinkSync(path); } catch {} } } };

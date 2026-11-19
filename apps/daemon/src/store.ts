@@ -87,7 +87,7 @@ export class Store {
     for (const field of ['checkpoint_sha', 'worker_json', 'cancellation_json', 'execution_json', 'recent_activity_json']) {
       if (!runCols.some(col => col.name === field)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${field} TEXT`);
     }
-    for (const [table, fields] of [['projects', ['model']], ['tasks', ['agent_id', 'model', 'execution']], ['runs', ['agent_id', 'model']]] as const) {
+    for (const [table, fields] of [['projects', ['model', 'reasoning_effort']], ['tasks', ['agent_id', 'model', 'execution', 'reasoning_effort']], ['runs', ['agent_id', 'model', 'reasoning_effort']]] as const) {
       const names = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
       for (const field of fields) if (!names.some(column => column.name === field)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${field} TEXT`);
     }
@@ -103,14 +103,14 @@ export class Store {
   }
   addProject(
     name: string, workspacePath: string, agentId: string,
-    execution: string = 'capability', extraPackages?: string[], mcpServers?: string[], model?: string | null,
+    execution: string = 'capability', extraPackages?: string[], mcpServers?: string[], model?: string | null, reasoningEffort?: string | null,
   ): Project {
     const r = this.db.prepare(
-      'INSERT INTO projects(name, workspace_path, agent_id, execution, extra_packages, mcp_servers, created_at, model) VALUES (?,?,?,?,?,?,?,?)',
+      'INSERT INTO projects(name, workspace_path, agent_id, execution, extra_packages, mcp_servers, created_at, model, reasoning_effort) VALUES (?,?,?,?,?,?,?,?,?)',
     ).run(name, workspacePath, agentId, execution,
       extraPackages?.length ? JSON.stringify(extraPackages) : null,
       mcpServers?.length ? JSON.stringify(mcpServers) : null,
-      new Date().toISOString(), model || null);
+      new Date().toISOString(), model || null, reasoningEffort || null);
     return this.getProject(Number(r.lastInsertRowid))!;
   }
   getProject(id: number): Project | undefined {
@@ -122,9 +122,10 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM projects WHERE name=?').get(name) as any;
     return row ? this.parseProject(row) : undefined;
   }
-  updateProject(id: number, patch: { agent_id?: string; model?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }): Project {
+  updateProject(id: number, patch: { agent_id?: string; model?: string | null; reasoning_effort?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] }): Project {
     if (patch.agent_id) this.db.prepare('UPDATE projects SET agent_id=? WHERE id=?').run(patch.agent_id, id);
     if (patch.model !== undefined) this.db.prepare('UPDATE projects SET model=? WHERE id=?').run(patch.model || null, id);
+    if (patch.reasoning_effort !== undefined) this.db.prepare('UPDATE projects SET reasoning_effort=? WHERE id=?').run(patch.reasoning_effort || null, id);
     if (patch.execution) this.db.prepare('UPDATE projects SET execution=? WHERE id=?').run(patch.execution, id);
     if (patch.extraPackages !== undefined) {
       this.db.prepare('UPDATE projects SET extra_packages=? WHERE id=?')
@@ -170,8 +171,8 @@ export class Store {
       draftOrder = (row?.m ?? 0) + 1;
     }
     const r = this.db.prepare(
-      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution) VALUES (?,?,?,?,?,?,?,?)',
-    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability');
+      'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution, reasoning_effort) VALUES (?,?,?,?,?,?,?,?,?)',
+    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability', project.reasoning_effort ?? null);
     return this.getTask(Number(r.lastInsertRowid))!;
   }
   addMergeTask(projectId: number, plan: MergePlan): Task {
@@ -255,8 +256,8 @@ export class Store {
   // ── runs ──
   insertRun(taskId: number, kind: 'normal' | 'resume'): Run {
     const task = this.getTask(taskId)!;
-    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status, agent_id, model) VALUES (?,?,?,?,?)')
-      .run(taskId, kind, 'starting', task.agent_id ?? 'codex', task.model ?? null);
+    const r = this.db.prepare('INSERT INTO runs(task_id, kind, status, agent_id, model, reasoning_effort) VALUES (?,?,?,?,?,?)')
+      .run(taskId, kind, 'starting', task.agent_id ?? 'codex', task.model ?? null, task.reasoning_effort ?? null);
     return this.getRun(Number(r.lastInsertRowid))!;
   }
   beginRun(taskId: number): Run | undefined {

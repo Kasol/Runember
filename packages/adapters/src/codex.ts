@@ -40,17 +40,19 @@ export class CodexAdapter implements AgentAdapter {
     public homeVolume: string,
   ) {}
 
-  buildArgs(prompt: string, execution?: ExecutionMode, schemaPath?: string, model?: string): string[] {
+  buildArgs(prompt: string, execution?: ExecutionMode, schemaPath?: string, model?: string, reasoningEffort?: string): string[] {
     const sandbox = execution === 'capability' ? 'danger-full-access' : 'workspace-write';
     return ['codex', 'exec', '--json', '--sandbox', sandbox,
       ...(model ? ['--model', model] : []),
+      ...(reasoningEffort ? ['-c', `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`] : []),
       ...(schemaPath ? ['--output-schema', schemaPath] : []), '--', prompt];
   }
 
-  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode, schemaPath?: string, model?: string): string[] {
+  buildResumeArgs(sessionId: string, feedback: string, execution?: ExecutionMode, schemaPath?: string, model?: string, reasoningEffort?: string): string[] {
     const sandbox = execution === 'capability' ? 'danger-full-access' : 'workspace-write';
     return ['codex', 'exec', '--sandbox', sandbox, 'resume', sessionId, '--json',
       ...(model ? ['--model', model] : []),
+      ...(reasoningEffort ? ['-c', `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`] : []),
       ...(schemaPath ? ['--output-schema', schemaPath] : []), '--', feedback];
   }
 

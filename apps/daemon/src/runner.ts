@@ -64,7 +64,7 @@ export class Runner {
 
   private projectForTask(task: Task): Project {
     const project = this.deps.store.getProject(task.project_id)!;
-    return { ...project, agent_id: task.agent_id ?? 'codex', model: task.model,
+    return { ...project, agent_id: task.agent_id ?? 'codex', model: task.model, reasoning_effort: task.reasoning_effort,
       execution: task.execution ?? project.execution ?? 'capability' };
   }
 
@@ -558,8 +558,8 @@ export class Runner {
         if (!isCapability) binds.push(`${toBind(hostPath)}:${responseSchemaPath}:ro`);
       }
       const cmd = priorSession && feedback
-        ? adapter.buildResumeArgs(priorSession, feedback, executionMode, responseSchemaPath, project.model || undefined)
-        : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, executionMode, responseSchemaPath, project.model || undefined);
+        ? adapter.buildResumeArgs(priorSession, feedback, executionMode, responseSchemaPath, project.model || undefined, project.reasoning_effort || undefined)
+        : adapter.buildArgs(feedback ? `${task.prompt}\n\n${feedback}` : task.prompt, executionMode, responseSchemaPath, project.model || undefined, project.reasoning_effort || undefined);
 
       let sessionId: string | undefined;
       let lastAgentText = '';
@@ -571,7 +571,7 @@ export class Runner {
       const isNative = isCapability; // capability = 宿主原生执行
       // native 模式不透传容器 env（CODEX_HOME=/codex-home 是容器内路径，宿主不存在）
       const nativeEnv = hostCodexProxyEnv(cfg.proxy);
-      const native = isNative ? prepareNativeAgent({ id: project.agent_id, cmd, model: project.model, cwd: project.workspace_path, runId: run.id, cfg }) : undefined;
+      const native = isNative ? prepareNativeAgent({ id: project.agent_id, cmd, model: project.model, reasoningEffort: project.reasoning_effort, cwd: project.workspace_path, runId: run.id, cfg }) : undefined;
       if (native) { cleanupAgent = native.cleanup; nativeEnv.push(...native.env); }
       const control = logPath + '.control';
       const onLine = (line: string) => {

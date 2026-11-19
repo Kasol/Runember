@@ -22,7 +22,7 @@ import { listProjectFolders, ProjectFolderError } from './project-folders.js';
 import { readRunLog } from './run-log.js';
 import { applyTaskAction, availableTaskActions } from './actions.js';
 import { DingTalkLanguage } from './dingtalk-language.js';
-import { agentCatalog, runtimeConfig, validateAgentPath, refreshAgentDiscovery } from './agent-runtime.js';
+import { agentCatalog, runtimeConfig, validateAgentPath, refreshAgentDiscovery, validateReasoningEffort, reasoningCapabilities } from './agent-runtime.js';
 import { agentDefinitions } from '@agentdesk/adapters';
 import { logSettings, validateLogDirectory } from './log-settings.js';
 import { diagnoseTask, diagnoseEnvironment } from './diagnostics.js';
@@ -189,15 +189,21 @@ export function buildServer(deps: {
   });
 
   /** 项目配置更新：模式切换 / extraPackages / mcpServers —— 切到 isolation 时重新守门检测 */
-  app.patch<{ Params: { id: string }; Body: { agent_id?: string; model?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] } }>(
+  app.get<{ Params: { id: string }; Querystring: { model?: string } }>('/api/agents/:id/reasoning', async (req, reply) => {
+    if (!availableAgents().includes(req.params.id)) return reply.code(400).send({ error: '未知 Agent' });
+    if (req.query.model && (req.query.model.length > 256 || /[\r\n\0]/.test(req.query.model))) return reply.code(400).send({ error: '模型名称无效' });
+    return reasoningCapabilities(runtimeConfig(cfg, store), req.params.id, req.query.model);
+  });
+
+  app.patch<{ Params: { id: string }; Body: { agent_id?: string; model?: string | null; reasoning_effort?: string | null; execution?: string; extraPackages?: string[]; mcpServers?: string[] } }>(
     '/api/projects/:id', async (req, reply) => {
       const p = store.getProject(Number(req.params.id));
       if (!p) return reply.code(404).send({ error: 'not found' });
-      const { agent_id, model, execution, extraPackages, mcpServers } = req.body ?? ({} as any);
+      const { agent_id, model, reasoning_effort, execution, extraPackages, mcpServers } = req.body ?? ({} as any);
       const nextAgent = agent_id ?? p.agent_id;
       if (!availableAgents().includes(nextAgent)) return reply.code(400).send({ error: `未知 agent: ${nextAgent}` });
       if (model !== undefined && model !== null && (typeof model !== 'string' || !model.trim() || model.length > 256 || /[\r\n\0]/.test(model))) return reply.code(400).send({ error: '模型名称必须为 1–256 个字符的单行文本，留空使用默认模型。' });
-      if ((nextAgent !== p.agent_id || (model !== undefined && model !== p.model)) && store.hasActiveTasks(p.id)) return reply.code(409).send({ error: '请先完成或取消该项目的排队、运行中任务，再修改 Agent 或模型。' });
+      if ((nextAgent !== p.agent_id || (model !== undefined && model !== p.model) || (reasoning_effort !== undefined && reasoning_effort !== p.reasoning_effort)) && store.hasActiveTasks(p.id)) return reply.code(409).send({ error: '请先完成或取消该项目的排队、运行中任务，再修改 Agent、模型或推理强度。' });
 
       let nextExecution = execution ?? p.execution ?? 'capability';
       if (!['capability', 'isolation'].includes(nextExecution)) {
@@ -206,6 +212,10 @@ export function buildServer(deps: {
       if (!(agentDefinitions.find(agent => agent.id === nextAgent)?.modes as readonly string[])?.includes(nextExecution)) return reply.code(400).send({ error: `${nextAgent} 当前仅支持能力优先模式。` });
       const nextModel = model === undefined ? (nextAgent === p.agent_id ? p.model : null) : model;
       if (nextAgent === 'zcode' && nextModel && !/^[^/]+\/.+/.test(nextModel)) return reply.code(400).send({ error: 'ZCode 模型请使用 provider/model 格式，或从建议列表选择。' });
+      let nextReasoning: string | null;
+      try { nextReasoning = validateReasoningEffort(runtimeConfig(cfg, store), nextAgent, nextModel,
+        reasoning_effort === undefined ? (nextAgent === p.agent_id && (nextModel ?? null) === (p.model ?? null) ? p.reasoning_effort : null) : reasoning_effort); }
+      catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
 
       // 模式切换到 isolation → 重新跑守门检测（capability 无需，永远可切）
       let platformNote: string | undefined;
@@ -220,7 +230,7 @@ export function buildServer(deps: {
       }
 
       const updated = store.updateProject(p.id, {
-        agent_id: nextAgent, model: nextModel,
+        agent_id: nextAgent, model: nextModel, reasoning_effort: nextReasoning,
         execution: nextExecution,
         ...(extraPackages !== undefined ? { extraPackages } : {}),
         ...(mcpServers !== undefined ? { mcpServers } : {}),
@@ -252,15 +262,18 @@ export function buildServer(deps: {
     return { ok: true, deleted: p.name };
   });
 
-  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; model?: string | null; execution?: 'capability' | 'isolation'; extraPackages?: string[]; mcpServers?: string[] } }>(
+  app.post<{ Body: { name: string; workspace_path: string; agent_id?: string; model?: string | null; reasoning_effort?: string | null; execution?: 'capability' | 'isolation'; extraPackages?: string[]; mcpServers?: string[] } }>(
     '/api/projects', async (req, reply) => {
-      const { name, workspace_path, agent_id = 'codex', model, execution = 'capability', extraPackages, mcpServers } = req.body ?? ({} as any);
+      const { name, workspace_path, agent_id = 'codex', model, reasoning_effort, execution = 'capability', extraPackages, mcpServers } = req.body ?? ({} as any);
       if (!name || !workspace_path) return reply.code(400).send({ error: 'name 与 workspace_path 必填' });
       if (!availableAgents().includes(agent_id)) return reply.code(400).send({ error: `未知 agent: ${agent_id}` });
       if (!['capability', 'isolation'].includes(execution)) return reply.code(400).send({ error: `execution 必须是 capability|isolation` });
       if (!(agentDefinitions.find(agent => agent.id === agent_id)?.modes as readonly string[])?.includes(execution)) return reply.code(400).send({ error: `${agent_id} 当前仅支持能力优先模式。` });
       if (model !== undefined && model !== null && (typeof model !== 'string' || !model.trim() || model.length > 256 || /[\r\n\0]/.test(model))) return reply.code(400).send({ error: '模型名称必须为 1–256 个字符的单行文本，留空使用默认模型。' });
       if (agent_id === 'zcode' && model && !/^[^/]+\/.+/.test(model)) return reply.code(400).send({ error: 'ZCode 模型请使用 provider/model 格式，或从建议列表选择。' });
+      let selectedReasoning: string | null;
+      try { selectedReasoning = validateReasoningEffort(runtimeConfig(cfg, store), agent_id, model, reasoning_effort); }
+      catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
       if (store.findProject(name)) return reply.code(409).send({ error: `项目名已存在: ${name}` });
       if (!existsSync(workspace_path)) return reply.code(400).send({ error: `路径不存在: ${workspace_path}` });
       if (extraPackages && !Array.isArray(extraPackages)) return reply.code(400).send({ error: 'extraPackages 必须是字符串数组' });
@@ -284,7 +297,7 @@ export function buildServer(deps: {
       }
 
       const gitCfg = await setupProjectGit(workspace_path);
-      const project = store.addProject(name, workspace_path, agent_id, execution, extraPackages, mcpServers, model);
+      const project = store.addProject(name, workspace_path, agent_id, execution, extraPackages, mcpServers, model, selectedReasoning);
       return reply.code(201).send({
         project,
         git: { version: gitInfo.version, config: gitCfg.message },
