@@ -17,11 +17,13 @@ import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:f
 import { delimiter, join, resolve as resolvePath } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { AppConfig } from './config.js';
+import { standaloneCodexPaths } from './codex-paths.js';
 
 /**
  * 宿主 codex CLI 发现：
- *  1. PATH 上的 codex（用户自装优先，如 npm -g）
- *  2. GUI 私有运行时：%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe 取最新
+ *  1. 官方独立安装器的稳定入口（不依赖 daemon 启动时的 PATH）
+ *  2. PATH 上的 codex（如 npm -g）
+ *  3. GUI 私有运行时：%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe 取最新
  *     （GUI 故意不注入 PATH——内核版本由 GUI 自管；哈希目录随升级变化，
  *      所以每次发现而非硬编码。结果带缓存，进程内复用。）
  */
@@ -34,6 +36,9 @@ export function findHostCodex(): string | undefined {
       accessSync(path, constants.X_OK);
       return statSync(path).isFile() ? path : undefined;
     } catch { return undefined; }
+  }
+  for (const path of standaloneCodexPaths()) {
+    try { if (statSync(path).isFile()) return path; } catch {}
   }
   if (codexPathCache && existsSync(codexPathCache)) return codexPathCache;
   for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {

@@ -3,7 +3,7 @@ import { client, type AgentInfo } from './api';
 import { reasoningOption, type ReasoningOption } from '@agentdesk/core';
 
 export function AgentFields(props: {
-  agent: string; model: string; reasoningEffort: string; disabled?: boolean;
+  agent: string; model: string; reasoningEffort: string; disabled?: boolean; scope?: 'task';
   onAgent: (agent: string) => void; onModel: (model: string) => void; onReasoningEffort: (effort: string) => void;
 }) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -50,7 +50,7 @@ export function AgentFields(props: {
         {props.reasoningEffort && !reasoning.some(item => item.id === props.reasoningEffort) && <option value={props.reasoningEffort}>{reasoningOption(props.reasoningEffort).label}（已保存，待核对）</option>}
         {reasoning.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
       </select>
-      <p className="field-help">{reasoningLoading ? '正在读取模型支持的选项…' : reasoningError ? `无法读取推理选项：${reasoningError}` : reasoning.length ? '只对本项目的新任务生效，不修改 Agent 全局配置。' : '当前模型未提供可选推理强度，可沿用 Agent 配置。'}</p>
+      <p className="field-help">{reasoningLoading ? '正在读取模型支持的选项…' : reasoningError ? `无法读取推理选项：${reasoningError}` : reasoning.length ? props.scope === 'task' ? '只对本任务生效，不修改项目默认配置。' : '只对本项目的新任务生效，不修改 Agent 全局配置。' : '当前模型未提供可选推理强度，可沿用 Agent 配置。'}</p>
     </div>
     {selected?.executable && <div className="agent-runtime-note"><span>当前 CLI</span><code>{selected.executable}</code></div>}
     {props.agent === 'zcode' && <p className="dim">ZCode 模型使用「供应商/模型」格式，可从输入框建议中选择。</p>}

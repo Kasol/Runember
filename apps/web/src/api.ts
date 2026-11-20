@@ -63,8 +63,8 @@ export const client = {
   runLog: (id: number, before?: number) => api<{ text: string; before: number | null }>(
     'GET', `/api/runs/${id}/log${before === undefined ? '' : `?before=${before}`}`,
   ),
-  createTask: (project: string | number, prompt: string, draft = false, timeoutMin?: number | null) =>
-    api<{ task: TaskView }>('POST', '/api/tasks', { project, prompt, draft, timeout_min: timeoutMin }),
+  createTask: (project: string | number, prompt: string, draft = false, timeoutMin?: number | null, binding?: { agent_id: string; model: string | null; reasoning_effort: string | null }) =>
+    api<{ task: TaskView }>('POST', '/api/tasks', { project, prompt, draft, timeout_min: timeoutMin, ...binding }),
   drafts: () => api<{ drafts: TaskView[] }>('GET', '/api/drafts'),
   projectFolders: (path?: string) => api<ProjectFolderListing>('POST', '/api/project-folders', { path }),
   draftOp: (id: number, op: 'edit' | 'moveBefore' | 'enqueue', extra?: { prompt?: string; beforeId?: number; timeout_min?: number | null }) =>

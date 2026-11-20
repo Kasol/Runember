@@ -1,0 +1,21 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {mkdtempSync,rmSync,mkdirSync,writeFileSync} from 'node:fs';import {resolve,join} from 'node:path';import Docker from 'dockerode';import {Store} from '../src/store.js';import {loadConfig} from '../src/config.js';import {buildServer} from '../src/server.js';import type {Scheduler} from '../src/scheduler.js';
+test('task overrides stay independent of project defaults and survive drafts, restart and subsequent runs',async t=>{
+ const dir=mkdtempSync(resolve('data/test-task-binding-'));let store=new Store(dir);const previousHome=process.env.CODEX_HOME;process.env.CODEX_HOME=join(dir,'codex-home');mkdirSync(process.env.CODEX_HOME);writeFileSync(join(process.env.CODEX_HOME,'models_cache.json'),JSON.stringify({models:[{slug:'project-model',supported_reasoning_levels:[{effort:'low'},{effort:'high'}]}]}));const cfg=loadConfig({configPath:join(dir,'absent.json'),dataDir:dir,logDir:dir});
+ const p=store.addProject('fixture',dir,'codex','capability',undefined,undefined,'project-model','high');
+ const app=buildServer({cfg,store,docker:new Docker(),notifiers:[],scheduler:{tickNow(){}} as Scheduler});
+ t.after(async()=>{await app.close();store.close();if(previousHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=previousHome;rmSync(dir,{recursive:true,force:true})});
+ const create=(binding:Record<string,unknown>={})=>app.inject({method:'POST',url:'/api/tasks',payload:{project:p.id,prompt:'unchanged prompt',draft:true,...binding}});
+ const inherited=(await create()).json().task;assert.equal(inherited.agent_id,'codex');assert.equal(inherited.model,'project-model');assert.equal(inherited.reasoning_effort,'high');
+ const low=(await create({reasoning_effort:'low'})).json().task;assert.equal(low.reasoning_effort,'low');assert.equal(low.model,'project-model');
+ assert.equal((await create({model:'other-model'})).json().task.reasoning_effort,null);
+ const override=(await create({agent_id:'deepseek',model:'deepseek-chat',reasoning_effort:null})).json().task;assert.equal(override.agent_id,'deepseek');assert.equal(override.model,'deepseek-chat');
+ const cleared=(await create({agent_id:'deepseek'})).json().task;assert.equal(cleared.model,null);assert.equal(cleared.reasoning_effort,null);
+ assert.equal((await create({model:null})).json().task.model,null);
+ for(const invalid of [{agent_id:'unknown'},{agent_id:null},{model:12},{model:''},{model:'bad\nmodel'},{reasoning_effort:'impossible'},{agent_id:'zcode',model:'missing-provider'}])assert.equal((await create(invalid)).statusCode,400,JSON.stringify(invalid));
+ const isolated=store.addProject('isolated',dir,'codex','isolation');assert.equal((await app.inject({method:'POST',url:'/api/tasks',payload:{project:isolated.id,prompt:'readonly',agent_id:'deepseek'}})).statusCode,400);
+ assert.equal(store.getProject(p.id)?.agent_id,'codex');assert.equal(store.getProject(p.id)?.model,'project-model');
+ store.close();store=new Store(dir);assert.equal(store.getTask(override.id)?.agent_id,'deepseek');
+ store.setTaskStatus(override.id,'queued');const first=store.beginRun(override.id)!;assert.equal(first.agent_id,'deepseek');assert.equal(first.model,'deepseek-chat');store.finishRun(first.id,{status:'succeeded',session_id:'deepseek-session'},'done');
+ store.updateProject(p.id,{agent_id:'zcode',model:'provider/other'});
+ store.setPendingFeedback(override.id,'continue');store.setTaskStatus(override.id,'queued');const next=store.beginRun(override.id)!;assert.equal(next.agent_id,'deepseek');assert.equal(next.model,'deepseek-chat');assert.equal(next.kind,'resume');assert.equal(store.getRun(first.id)?.model,'deepseek-chat');
+});

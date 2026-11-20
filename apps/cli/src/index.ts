@@ -115,7 +115,8 @@ async function main(): Promise<void> {
       return;
     }
     case 'draft': {
-      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'}}});
+      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'},agent:{type:'string'},model:{type:'string'},'reasoning-effort':{type:'string'}}});
+      const binding = { agent_id: values.agent, model: values.model === undefined ? undefined : values.model || null, reasoning_effort: values['reasoning-effort'] === undefined ? undefined : values['reasoning-effort'] || null };
       const timeout_min=values['timeout-min']===undefined?undefined:validateTaskTimeout(Number(values['timeout-min']));
       const [sub, idOrProject, ...text] = positionals;
       if (sub === 'list') {
@@ -125,10 +126,11 @@ async function main(): Promise<void> {
       }
       const prompt = text.join(' ');
       if (sub === 'add' && idOrProject && prompt.trim()) {
-        const { task } = await api('POST', '/api/tasks', { project: idOrProject, prompt, draft: true, timeout_min });
+        const { task } = await api('POST', '/api/tasks', { project: idOrProject, prompt, draft: true, timeout_min, ...binding });
         console.log(`草稿 #${task.id} 已保存。`);
         return;
       }
+      if (sub !== 'add' && Object.values(binding).some(value => value !== undefined)) throw new Error('执行配置只支持创建任务或草稿时指定；续跑保留原 Agent。');
       if (idOrProject && /^#?\d+$/.test(idOrProject) && ((sub === 'edit' && prompt.trim()) || sub === 'run')) {
         const id = Number(idOrProject.replace(/^#/, ''));
         await api('POST', `/api/tasks/${id}/draft`, sub === 'edit' ? { op: 'edit', prompt, timeout_min } : { op: 'enqueue', timeout_min });
@@ -138,12 +140,13 @@ async function main(): Promise<void> {
       throw new Error('用法: desk draft list | draft add <项目> <描述> | draft edit <编号> <描述> | draft run <编号>');
     }
     case 'run': {
-      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'}}});
+      const {values,positionals}=parseArgs({args:rest,allowPositionals:true,options:{'timeout-min':{type:'string'},agent:{type:'string'},model:{type:'string'},'reasoning-effort':{type:'string'}}});
+      const binding = { agent_id: values.agent, model: values.model === undefined ? undefined : values.model || null, reasoning_effort: values['reasoning-effort'] === undefined ? undefined : values['reasoning-effort'] || null };
       const timeout_min=values['timeout-min']===undefined?null:validateTaskTimeout(Number(values['timeout-min']));
       const [project, ...promptParts] = positionals;
       const prompt = promptParts.join(' ');
-      if (!project || !prompt) { console.log('用法: desk run <projectName> "任务指令" [--timeout-min 分钟]'); return; }
-      const { task } = await api('POST', '/api/tasks', { project, prompt, timeout_min });
+      if (!project || !prompt) { console.log('用法: desk run <projectName> "任务指令" [--timeout-min 分钟] [--agent codex] [--model 模型] [--reasoning-effort high]'); return; }
+      const { task } = await api('POST', '/api/tasks', { project, prompt, timeout_min, ...binding });
       console.log(`📋 任务已入队 #${task.id}（项目 ${project}）`);
       console.log(`   查看进度: npm run desk -- status ${task.id}`);
       return;

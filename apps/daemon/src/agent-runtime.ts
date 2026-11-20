@@ -10,6 +10,24 @@ import type { AppConfig } from './config.js';
 import { zcodeBridgeMain } from './zcode-bridge.js';
 import { reasoningOption, type ReasoningOption } from '@agentdesk/core';
 import { applyNetworkSettings } from './network-settings.js';
+import { standaloneCodexPaths } from './codex-paths.js';
+import type { Project } from '@agentdesk/core';
+
+export function taskAgentBinding(cfg: AppConfig, project: Project, overrides: { agent_id?: unknown; model?: unknown; reasoning_effort?: unknown }) {
+  const agent = overrides.agent_id === undefined ? project.agent_id : overrides.agent_id;
+  const definition = agentDefinitions.find(item => item.id === agent);
+  if (!definition) throw new Error('未知 Agent。');
+  if (!(definition.modes as readonly string[]).includes(project.execution ?? 'capability')) throw new Error(`${agent} 不支持此项目的执行模式。`);
+  const changed = agent !== project.agent_id;
+  const model = overrides.model === undefined ? changed ? null : project.model ?? null : overrides.model;
+  if (model !== null && (typeof model !== 'string' || !model.trim() || model.length > 256 || /[\r\n\0]/.test(model))) throw new Error('模型名称必须为 1–256 个字符的单行文本，默认模型请传 null。');
+  if (agent === 'zcode' && model && !/^[^/]+\/.+/.test(model)) throw new Error('ZCode 模型请使用 provider/model 格式。');
+  const effort = overrides.reasoning_effort === undefined
+    ? changed || model !== (project.model ?? null) ? null : project.reasoning_effort
+    : overrides.reasoning_effort;
+  return { agent_id: definition.id, model: model as string | null,
+    reasoning_effort: validateReasoningEffort(cfg, definition.id, model as string | null, effort) };
+}
 
 interface NativeAgent { command: string[]; env: string[]; executable: string }
 
@@ -26,7 +44,7 @@ export function runtimeConfig(cfg: AppConfig, store: Pick<Store, 'getSetting'>):
 function isFile(path: string): boolean { try { return statSync(path).isFile(); } catch { return false; } }
 
 export function detectedAgentPaths(id: string): string[] {
-  const candidates: string[] = [];
+  const candidates: string[] = id === 'codex' ? standaloneCodexPaths() : [];
   for (const directory of (process.env.PATH ?? '').split(delimiter).filter(Boolean).map(path => path.replace(/^"|"$/g, ''))) {
     const name = id === 'codex' ? 'codex' : id === 'zcode' ? 'zcode' : 'dsh';
     candidates.push(join(directory, process.platform === 'win32' ? name + '.exe' : name));

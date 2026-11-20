@@ -69,7 +69,7 @@ npm run typecheck                                # tsc --noEmit（提交前必�
 - Codex 接收用户的任务指令或续跑反馈。提交、推送和验收按适用的 skill 与用户指令执行。
 - 普通任务按运行事件结算。正常退出、启动失败、超时和中断都显示为「已结束」，详情保留运行事实和 Agent 答复。只有适配器事件或有效的旧版 `###AGENTCTL_BLOCKED###` 请求才进入「等待确认」。旧版 `###AGENTCTL_RESULT###` 继续作为结果详情读取。
 - Codex 适配器通过 `--output-schema` 接收最终答复中的必需输入请求。任务提示词和原会话续跑反馈按原文传递。
-- 支持 codex / zcode / deepseek，项目绑定 Agent 和可选模型。Task 创建时保存 agent_id / model / execution，Run 保存该轮绑定；旧 Task 按 Codex 兼容，不能用项目当前 Agent 覆盖历史任务或跨 Agent 恢复会话。
+- 支持 codex / zcode / deepseek，项目提供 Agent、模型与推理强度的默认值，新任务可独立覆盖；钉钉沿用项目默认值。Task 创建时保存 agent_id / model / execution，Run 保存该轮绑定；旧 Task 按 Codex 兼容，不能用项目当前 Agent 覆盖历史任务或跨 Agent 恢复会话。
 - 宿主执行入口由 agent-runtime.ts 按 Agent 发现；ZCode 桌面内置 zcode.cjs 通过原生会话协议运行，DeepSeek 桌面通过官方 dsh-desktop-host CLI 的 headless --json 运行。模型使用会话参数或单次覆盖层，禁止修改用户的 Agent 默认配置。新增 Agent 的隔离镜像未验收时明确拒绝 isolation。
 - 用 `继续 <编号> [说明]` 或 `resume <编号> [说明]` 续跑，编号可带 `#`。用户明确续跑时，能力优先任务可以接着处理当前工作树上的 Git 操作。
 - 展示 agent 总结时用 `stripAgentctlLines()` 剥离协议标记行，别让协议原文漏给用户

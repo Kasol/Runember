@@ -599,6 +599,10 @@ function TaskPanel(props: { taskId: number; onClose: () => void; onAct: (id: num
 }
 
 function NewTask(props: { project?: Project; onCreated: () => void }) {
+  const [customAgent, setCustomAgent] = useState(false);
+  const [agent, setAgent] = useState('codex');
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [timeout, setTimeoutValue] = useState('');
@@ -611,7 +615,7 @@ function NewTask(props: { project?: Project; onCreated: () => void }) {
     setBusy(true);
     try {
       const timeoutMin=validateTaskTimeout(timeout===''?null:Number(timeout));
-      await client.createTask(project.id, prompt, draft, timeoutMin);
+      await client.createTask(project.id, prompt, draft, timeoutMin, customAgent ? { agent_id: agent, model: model.trim() || null, reasoning_effort: effort || null } : undefined);
       setPrompt('');
       setTimeoutValue('');
       setOpen(false);
@@ -621,11 +625,13 @@ function NewTask(props: { project?: Project; onCreated: () => void }) {
   };
 
   if (!open) {
-    return <button className="primary" disabled={!project} onClick={() => setOpen(true)}>＋ 新建任务</button>;
+    return <button className="primary" disabled={!project} onClick={() => { setCustomAgent(false); setAgent(project?.agent_id ?? 'codex'); setModel(project?.model ?? ''); setEffort(project?.reasoning_effort ?? ''); setOpen(true); }}>＋ 新建任务</button>;
   }
   return (
     <Modal title="📝 新建任务" onClose={() => setOpen(false)}>
       <div className="new-task-context"><strong>{project?.name}</strong><span>Agent · {agentLabel(project?.agent_id)} · {project?.model || '默认模型'} · {reasoningLabel(project?.reasoning_effort)}</span></div>
+      <label><input type="checkbox" checked={customAgent} disabled={busy} onChange={e => setCustomAgent(e.target.checked)} /> 调整本任务配置</label>
+      {customAgent && <AgentFields scope="task" agent={agent} model={model} reasoningEffort={effort} disabled={busy} onAgent={setAgent} onModel={setModel} onReasoningEffort={setEffort} />}
       <Labeled label="任务描述">
         <textarea
           placeholder="描述要执行的任务"

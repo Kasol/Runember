@@ -176,7 +176,7 @@ export class Store {
 
   // ── tasks ──
   /** draft=true 时任务以 draft 状态落库（不参与调度），draft_order 用于草稿排序 */
-  addTask(projectId: number, prompt: string, opts?: { draft?: boolean; timeoutMin?: number | null }): Task {
+  addTask(projectId: number, prompt: string, opts?: { draft?: boolean; timeoutMin?: number | null; binding?: Pick<Task, 'agent_id' | 'model' | 'reasoning_effort'> }): Task {
     const timeoutMin = validateTaskTimeout(opts?.timeoutMin);
     const project = this.getProject(projectId)!;
     const status = opts?.draft ? 'draft' : 'queued';
@@ -189,7 +189,7 @@ export class Store {
     }
     const r = this.db.prepare(
       'INSERT INTO tasks(project_id, prompt, status, draft_order, created_at, agent_id, model, execution, reasoning_effort, timeout_min) VALUES (?,?,?,?,?,?,?,?,?,?)',
-    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), project.agent_id, project.model ?? null, project.execution ?? 'capability', project.reasoning_effort ?? null, timeoutMin);
+    ).run(projectId, prompt, status, draftOrder, new Date().toISOString(), opts?.binding?.agent_id ?? project.agent_id, opts?.binding ? opts.binding.model ?? null : project.model ?? null, project.execution ?? 'capability', opts?.binding ? opts.binding.reasoning_effort ?? null : project.reasoning_effort ?? null, timeoutMin);
     return this.getTask(Number(r.lastInsertRowid))!;
   }
   addMergeTask(projectId: number, plan: MergePlan): Task {

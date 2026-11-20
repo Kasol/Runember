@@ -100,3 +100,11 @@ DeepSeek Harness 不允许项目 `.env` 声明 `HTTPS_PROXY` / `HTTP_PROXY` 等�
 ## 隔离执行（进阶）
 
 默认能力优先不要求 Docker。Codex 的 Linux 容器隔离模式是单独的执行选项，需要 Docker、镜像和容器凭证。ZCode、DeepSeek Harness 的隔离镜像未验收时明确拒绝。新用户先把能力优先模式跑通即可。
+
+### 单个任务的执行配置
+
+项目提供默认 Agent、模型和推理强度。Web / 桌面端新建任务时勾选「调整本任务配置」可覆盖默认值，也可保存为草稿；不修改项目或 Agent 全局设置。
+
+CLI：`desk run <项目> "描述" --agent codex --model <模型> --reasoning-effort high`，`desk draft add` 同样支持这些参数。API 创建任务支持可选的 `agent_id`、`model`、`reasoning_effort`；模型与推理强度传 `null` 表示沿用 Agent 自身配置。切换 Agent 会清空未显式指定的项目模型和强度；切换模型会清空未显式指定的推理强度。
+
+任务创建时保存配置，后续项目配置变化不影响它；续跑、重试保留任务配置，Run 保存实际执行快照。切换到另一 Agent 请新建任务，不会跨执行器恢复会话。执行模式与工作目录仍由项目决定，配置不支持的组合会被拒绝。同一工作目录的任务仍遵守占用限制。

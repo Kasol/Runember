@@ -22,7 +22,7 @@ import { listProjectFolders, ProjectFolderError } from './project-folders.js';
 import { readRunLog } from './run-log.js';
 import { applyTaskAction, availableTaskActions } from './actions.js';
 import { DingTalkLanguage } from './dingtalk-language.js';
-import { agentCatalog, runtimeConfig, validateAgentPath, refreshAgentDiscovery, validateReasoningEffort, reasoningCapabilities } from './agent-runtime.js';
+import { taskAgentBinding, agentCatalog, runtimeConfig, validateAgentPath, refreshAgentDiscovery, validateReasoningEffort, reasoningCapabilities } from './agent-runtime.js';
 import { agentDefinitions } from '@agentdesk/adapters';
 import { logSettings, validateLogDirectory } from './log-settings.js';
 import { diagnoseTask, diagnoseEnvironment } from './diagnostics.js';
@@ -329,7 +329,7 @@ export function buildServer(deps: {
   app.get<{ Querystring: { status?: TaskStatus } }>('/api/tasks', async (req) =>
     ({ tasks: store.listTaskViews(req.query?.status) }));
 
-  app.post<{ Body: { project: string | number; prompt: string; draft?: boolean; timeout_min?: number | null } }>(
+  app.post<{ Body: { project: string | number; prompt: string; draft?: boolean; timeout_min?: number | null; agent_id?: string; model?: string | null; reasoning_effort?: string | null } }>(
     '/api/tasks', async (req, reply) => {
       const { project, prompt, draft, timeout_min } = req.body ?? ({} as any);
       if (!project || typeof prompt !== 'string' || !prompt.trim()) {
@@ -340,9 +340,10 @@ export function buildServer(deps: {
         : store.findProject(project);
       if (!p) return reply.code(404).send({ error: `项目不存在: ${project}` });
       let timeoutMin: number | null;
-      try { timeoutMin = validateTaskTimeout(timeout_min); }
+      let binding: ReturnType<typeof taskAgentBinding>;
+      try { timeoutMin = validateTaskTimeout(timeout_min); binding = taskAgentBinding(runtimeConfig(cfg, store), p, req.body); }
       catch (error) { return reply.code(400).send({error:(error as Error).message}); }
-      const task = store.addTask(p.id, prompt, { draft: !!draft, timeoutMin });
+      const task = store.addTask(p.id, prompt, { draft: !!draft, timeoutMin, binding });
       if (!draft) scheduler.tickNow();
       return reply.code(201).send({ task: taskView(task) });
     },
